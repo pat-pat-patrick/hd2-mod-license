@@ -2,3 +2,6 @@ worker/wrangler.toml
 .wrangler/
 node_modules/
 signing_key.*
+plugin/**/bin/
+plugin/**/obj/
+plugin/release/
