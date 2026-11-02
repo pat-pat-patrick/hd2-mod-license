@@ -18,6 +18,9 @@
 --   holder=<who>
 --   sig=<hex RSASSA-PKCS1-v1_5 SHA-256 over every byte before this line>
 --
+-- one such license per member who signed in on this computer, one after
+-- another (two players sharing a computer each keep theirs); any may pass.
+--
 -- The account is Network.peer_id(), the id the game names the player's save
 -- file after (saves\<id>_user_settings.config).
 --
@@ -236,11 +239,11 @@ end
 -- ------------------------------------------------------------------ license
 
 -- text -> fields | nil, reason. now: unix time; account: 16 hex or nil.
-function M.verify(text, key, now, account)
-  if type(text) ~= "string" then return nil, "malformed" end
-  text = text:gsub("\r", "")
+-- One license. The cheap tests come first, so the signature (the 9 ms) is
+-- checked only for a license that names this account and has not run out.
+local function one(text, key, now, account)
   local at = text:find("\nsig=", 1, true)
-  if text:sub(1, 18) ~= "HD2 MOD LICENSE 1\n" or not at then return nil, "malformed" end
+  if not at then return nil, "malformed" end
   local signed = text:sub(1, at)
   local sig = text:sub(at + 5):match("^(%x+)\n?$")
   if not sig then return nil, "malformed" end
@@ -249,8 +252,6 @@ function M.verify(text, key, now, account)
   local expires = tonumber(fields.expires)
   if not fields.accounts or not expires or not fields.issuer then return nil, "malformed" end
   if fields.issuer ~= key.issuer then return nil, "issuer" end
-  if not M.verify_signature(signed, sig:lower(), key) then return nil, "signature" end
-  if now and now >= expires then return nil, "expired" end
   if account then
     local found = false
     for a in fields.accounts:gmatch("[^,]+") do
@@ -258,7 +259,36 @@ function M.verify(text, key, now, account)
     end
     if not found then return nil, "account" end
   end
+  if now and now >= expires then return nil, "expired" end
+  if not M.verify_signature(signed, sig:lower(), key) then return nil, "signature" end
   return fields
+end
+
+-- How near a license came to passing: the reason given when none passes.
+local NEAR = { malformed = 1, issuer = 2, account = 3, expired = 4, signature = 5 }
+
+-- text -> fields | nil, reason. The file holds one license per member who
+-- signed in on this computer, one after another; any of them may pass.
+function M.verify(text, key, now, account)
+  if type(text) ~= "string" then return nil, "malformed" end
+  text = text:gsub("\r", "")
+  local header = "HD2 MOD LICENSE 1\n"
+  local reason = nil
+  local at = 1
+  while true do
+    local s = text:find(header, at, true)
+    if not s or (s ~= 1 and text:sub(s - 1, s - 1) ~= "\n") then
+      if s then at = s + 1 else break end
+    else
+      local e = text:find("\n" .. header, s, true)
+      local fields, why = one(text:sub(s, e or #text), key, now, account)
+      if fields then return fields end
+      if reason == nil or NEAR[why] > NEAR[reason] then reason = why end
+      if not e then break end
+      at = e + 1
+    end
+  end
+  return nil, reason or "malformed"
 end
 
 local function license_path(issuer)
