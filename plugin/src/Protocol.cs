@@ -36,6 +36,13 @@ namespace Hd2Qd.License
         const string FileName = "hd2_license.json", Header = "HD2 MOD LICENSE 1\n", StoreName = "licenses.json";
         static readonly Regex Issuer = new Regex(@"^(?:[a-z0-9][a-z0-9.-]*|(?:localhost|127\.0\.0\.1):\d{1,5})$");
         static readonly Regex Account = new Regex("^[0-9a-f]{16}$");
+        // names reserved for tests and examples (RFC 2606, RFC 6761): no members' site can ever
+        // answer there. localhost:port is not one of them: an author tries their own issuer there.
+        static readonly Regex Reserved = new Regex(@"(?:^|\.)(?:test|example|invalid|localhost|example\.(?:com|net|org))$");
+
+        /// <summary>True when the issuer is a name reserved for tests (issuer.test, ...): a test
+        /// build's declaration. Nobody can sign in there, so the manager offers no sign-in.</summary>
+        public static bool TestIssuer(string issuer) => issuer != null && Reserved.IsMatch(issuer);
         static readonly byte[] Salt = Encoding.UTF8.GetBytes("hd2qd license renew");
         static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
 
@@ -83,8 +90,15 @@ namespace Hd2Qd.License
         /// license yet), "other_account" (the licenses name no account here), "invalid" (none is
         /// signed by the declared key), "key_changed" (the declared key is not the one signed in
         /// with: ask the player), or "no_account" (no game account here yet: start the game
-        /// once). members: how many members' licenses the file holds.</summary>
+        /// once). members: how many members' licenses the file holds. A test issuer (TestIssuer)
+        /// that has no license good here is "test_issuer" instead: there is no site to sign in to.</summary>
         public static Dictionary<string, object> Status(string home, string appData, Dictionary<string, object> decl)
+        {
+            var r = StatusOf(home, appData, decl);
+            return TestIssuer(Json.Str(decl, "issuer")) && Json.Str(r, "state") != "licensed" ? With(r, "test_issuer") : r;
+        }
+
+        static Dictionary<string, object> StatusOf(string home, string appData, Dictionary<string, object> decl)
         {
             string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key");
             var r = new Dictionary<string, object> { ["issuer"] = issuer, ["name"] = Json.Str(decl, "name") };
@@ -113,9 +127,10 @@ namespace Hd2Qd.License
 
         /// <summary>Step one: {url, nonce}; the manager opens url in the browser, where the player
         /// signs in to the issuer's members' site. {error: "no_account"} when the game has not
-        /// made a settings file here yet.</summary>
+        /// made a settings file here yet; {error: "test_issuer"} for a test build's issuer.</summary>
         public static Dictionary<string, object> BeginSignIn(string appData, Dictionary<string, object> decl)
         {
+            if (TestIssuer(Json.Str(decl, "issuer"))) return Err("test_issuer");
             var accounts = Accounts(appData);
             if (accounts.Count == 0) return Err("no_account");
             var nonce = Hex(Random(16));

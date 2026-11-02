@@ -381,6 +381,45 @@ namespace Hd2Qd.License.Tests
             Assert.Null(Plugin.ModNote(Path.Combine(Root, "library", "Free"), Host()));
         }
 
+        /// <summary>A test build declares an issuer reserved for tests (issuer.test): there is no
+        /// site to sign in to, so it says so instead of offering a sign-in that can only fail. The
+        /// same author's released build (a real issuer) still signs in.</summary>
+        [Fact]
+        public void A_test_builds_issuer_offers_no_sign_in()
+        {
+            foreach (var name in new[] { "issuer.test", "x.example", "a.invalid", "dev.localhost", "example.com", "lic.example.org", "test" })
+                Assert.True(Plugin.TestIssuer(name), name);
+            foreach (var name in new[] { "license.patpatpatrick.com", "contest.com", "latest.net", "notexample.com", "localhost:8787", "127.0.0.1:8787", issuer.Name })
+                Assert.False(Plugin.TestIssuer(name), name);
+
+            Account(A);
+            var test = LicensedMod("Gate test", issuerName: "issuer.test");
+            Assert.Equal("test_issuer", Json.Str(StateOf(test), "state"));
+            Assert.Equal("test_issuer", Json.Str(BeginSignIn(Decl(test)), "error"));
+            var note = Plugin.ModNote(test, Host());
+            Assert.Equal("Test build", Json.Str(note, "text"));
+            Assert.Equal("测试版", Json.Str(note, "text_zh"));
+            InLibrary("Gate test", test);
+            var ex = Assert.Throws<InvalidOperationException>(() => Plugin.Run("license-login", new[] { "issuer.test" }, new StringWriter(), Host()));
+            Assert.Contains("test build", ex.Message);
+            var o = new StringWriter();
+            Plugin.Run("license", new string[0], o, Host());
+            Assert.Contains("Test Author (issuer.test): a test build's issuer", o.ToString());
+
+            // a license the author signed by hand for their test build still counts
+            var file = Path.Combine(appData, "Arrowhead", "Helldivers2", "licenses", "issuer.test.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            File.WriteAllText(file, issuer.License("a", new[] { A }, 30, issuerName: "issuer.test"));
+            Assert.Equal("licensed", Json.Str(StateOf(test), "state"));
+            Assert.Null(Plugin.ModNote(test, Host()));
+
+            // the released build of the same author signs in as before
+            var released = LicensedMod("Released");
+            Assert.Equal("none", Json.Str(StateOf(released), "state"));
+            Assert.Equal("ok", SignIn(released));
+            Assert.Equal("licensed", Json.Str(StateOf(released), "state"));
+        }
+
         /// <summary>Its commands, as the manager's command line runs them.</summary>
         [Fact]
         public void The_license_command_lists_each_issuer_and_its_mods()
@@ -446,10 +485,10 @@ namespace Hd2Qd.License.Tests
                 Nonce = u.Query.Split('&')[0].Substring(3);
             }
 
-            public string License(string key, string[] accounts, int days, string holder = "p:1")
+            public string License(string key, string[] accounts, int days, string holder = "p:1", string issuerName = null)
             {
                 long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                var text = "HD2 MOD LICENSE 1\nissuer=" + Name + "\naccounts=" + string.Join(",", accounts) +
+                var text = "HD2 MOD LICENSE 1\nissuer=" + (issuerName ?? Name) + "\naccounts=" + string.Join(",", accounts) +
                            "\nissued=" + now + "\nexpires=" + (now + days * 86400L) + "\nholder=" + holder + "\n";
                 var pkcs8 = Convert.FromBase64String(Json.Str(Json.Obj(t.keys, key), "pkcs8"));
                 using (var rsa = new RSACng(CngKey.Import(pkcs8, CngKeyBlobFormat.Pkcs8PrivateBlob)))

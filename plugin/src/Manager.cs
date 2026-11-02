@@ -74,11 +74,13 @@ namespace Hd2Qd.License
             var st = StateOf(Home(host), AppData(host), modFolder);
             var state = Json.Str(st, "state");
             if (state == null || state == "licensed") return null;
-            string key = state == "expired" ? "row_license_expired" : state == "bad_declaration" ? "lic_bad_declaration" : "row_license";
+            string key = state == "expired" ? "row_license_expired" : state == "bad_declaration" ? "lic_bad_declaration"
+                : state == "test_issuer" ? "row_license_test" : "row_license";
+            string tip = state == "test_issuer" ? "row_license_test_tip" : "row_license_tip";
             return new Dictionary<string, object>
             {
                 ["text"] = Words.Get(key, false), ["text_zh"] = Words.Get(key, true),
-                ["tip"] = Words.Get("row_license_tip", false), ["tip_zh"] = Words.Get("row_license_tip", true),
+                ["tip"] = Words.Get(tip, false), ["tip_zh"] = Words.Get(tip, true),
                 ["colour"] = "Yellow",
             };
         }
@@ -127,6 +129,7 @@ namespace Hd2Qd.License
                     var decl = IssuerArg(home, library, args[0]);
                     var begin = BeginSignIn(appData, decl);
                     if (Json.Str(begin, "error") == "no_account") throw new InvalidOperationException("no game account on this computer yet: start the game once, then sign in");
+                    if (Json.Str(begin, "error") != null) throw new InvalidOperationException(CommandError(Json.Str(begin, "error")));
                     o.WriteLine("your browser opens " + Json.Str(decl, "issuer") + ", the issuer of " + Json.Str(decl, "name") + "; it learns your game account id (" + Accounts(appData)[0] + ")");
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Json.Str(begin, "url")) { UseShellExecute = true });
                     var r = FinishSignIn(home, appData, decl, Json.Str(begin, "nonce"), 600, CancellationToken.None);
@@ -188,6 +191,7 @@ namespace Hd2Qd.License
                 case "invalid": return "the license here is not signed by this issuer's key";
                 case "key_changed": return "a mod declares another key than the one signed in with: check where it came from";
                 case "no_account": return "no game account here yet: start the game once";
+                case "test_issuer": return "a test build's issuer: there is no site to sign in to; use the author's released build";
                 default: return Json.Str(st, "state");
             }
         }
@@ -204,6 +208,7 @@ namespace Hd2Qd.License
                 case "network": return "the issuer cannot be reached";
                 case "bad_license": return "the issuer's license is not signed by the key the mod declares";
                 case "key_changed": return "a mod declares another key than the one signed in with: check where it came from";
+                case "test_issuer": return "this is a test build's issuer: nobody can sign in there; use the author's released build";
                 default: return "the sign-in failed: " + error;
             }
         }

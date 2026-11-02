@@ -83,16 +83,20 @@ namespace Hd2Qd.License
                 else
                 {
                     bool canSignIn = state != "no_account" && state != "key_changed";
-                    var signIn = new Button
+                    // a test build's issuer has no site: no button that can only fail
+                    if (!TestIssuer(issuer))
                     {
-                        Content = Words.Get(state == "licensed" || state == "expired" ? "lic_sign_in_again" : "lic_sign_in", zh),
-                        Style = Style(state == "licensed" ? "Ghost" : "Primary"), MinHeight = 36, IsEnabled = canSignIn && signingIn == null,
-                    };
-                    signIn.Click += (s, e) => SignIn(decl, host);
-                    buttons.Children.Add(signIn);
-                    if (state != "none" && state != "no_account")
+                        var signIn = new Button
+                        {
+                            Content = Words.Get(state == "licensed" || state == "expired" ? "lic_sign_in_again" : "lic_sign_in", zh),
+                            Style = Style(state == "licensed" ? "Ghost" : "Primary"), MinHeight = 36, IsEnabled = canSignIn && signingIn == null,
+                        };
+                        signIn.Click += (s, e) => SignIn(decl, host);
+                        buttons.Children.Add(signIn);
+                    }
+                    if (state != "none" && state != "no_account" && state != "test_issuer")
                     {
-                        var signOut = new Button { Content = Words.Get("lic_sign_out", zh), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(8, 0, 0, 0) };
+                        var signOut = new Button { Content = Words.Get("lic_sign_out", zh), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
                         signOut.Click += (s, e) =>
                         {
                             if (!Ask(host, Words.Get("lic_sign_out_ask", zh), Words.Get("lic_sign_out", zh))) return;
@@ -138,7 +142,7 @@ namespace Hd2Qd.License
                 accounts = Accounts(appData);
             }
             catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F("failed", zh, x.Message)); return; }
-            if (Json.Str(begin, "error") != null) { Tell(host, Words.Get("lic_no_account", zh)); return; }
+            if (Json.Str(begin, "error") != null) { Tell(host, Words.Get("lic_" + Json.Str(begin, "error"), zh)); return; }
             // the issuer learns the game account: said before anything is sent
             if (!Ask(host, Words.F("lic_ask", zh, issuer, Json.Str(decl, "name"), accounts[0]), Words.Get("lic_sign_in", zh))) return;
 
