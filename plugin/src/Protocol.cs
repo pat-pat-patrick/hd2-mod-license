@@ -23,15 +23,15 @@ namespace Hd2Qd.License
     public static partial class Plugin
     {
         /// <summary>Raised when the calls change shape; the manager refuses a plugin of another Api.</summary>
-        public const int Api = 1;
+        public const int Api = 2;
         /// <summary>"panel": drawn in the manager's own window (its plugins page).</summary>
         public const string Kind = "panel";
 
-        public static string Title(bool zh) => zh ? "会员授权" : "Member licenses";
+        /// <summary>The plugin's name in the language lang (a language tag: en, zh-CN, ...).</summary>
+        public static string Title(string lang) => Words.Get(lang, "lic_title");
 
-        public static string Summary(bool zh) => zh
-            ? "部分 MOD 仅供作者的会员使用。首次使用需在作者的网站登录，授权到期前将自动续期。"
-            : "Some mods are available only to their author's members. Sign in to the author's site once; the license is renewed automatically before it expires.";
+        /// <summary>One sentence on what it does, in lang.</summary>
+        public static string Summary(string lang) => Words.Get(lang, "lic_summary");
 
         const string FileName = "hd2_license.json", Header = "HD2 MOD LICENSE 1\n", StoreName = "licenses.json";
         static readonly Regex Issuer = new Regex(@"^(?:[a-z0-9][a-z0-9.-]*|(?:localhost|127\.0\.0\.1):\d{1,5})$");

@@ -55,9 +55,9 @@ namespace Hd2Qd.License.Tests
         /// <summary>The manager's library as the plugin is handed it: {name, path, enabled}.</summary>
         readonly List<Dictionary<string, object>> library = new List<Dictionary<string, object>>();
         void InLibrary(string name, string folder) => library.Add(new Dictionary<string, object> { ["name"] = name, ["path"] = folder, ["enabled"] = true });
-        Dictionary<string, object> Host() => new Dictionary<string, object>
+        Dictionary<string, object> Host(string lang = "en") => new Dictionary<string, object>
         {
-            ["home"] = Home, ["appdata"] = appData, ["zh"] = false,
+            ["home"] = Home, ["appdata"] = appData, ["lang"] = lang,
             ["library"] = (Func<List<Dictionary<string, object>>>)(() => library),
         };
 
@@ -374,7 +374,10 @@ namespace Hd2Qd.License.Tests
             var mod = LicensedMod();
             var note = Plugin.ModNote(mod, Host());
             Assert.Equal("Needs a license", Json.Str(note, "text"));
-            Assert.Equal("需要授权", Json.Str(note, "text_zh"));
+            Assert.Equal("需要授权", Json.Str(Plugin.ModNote(mod, Host("zh-CN")), "text"));
+            Assert.Equal("仅供作者的会员使用：请在「插件」页登录（齿轮旁的拼图按钮）。", Json.Str(Plugin.ModNote(mod, Host("zh-CN")), "tip"));
+            Assert.Equal("Needs a license", Json.Str(Plugin.ModNote(mod, Host("de-AT")), "text"));   // no German: English
+            Assert.Equal("Needs a license", Json.Str(Plugin.ModNote(mod, new Dictionary<string, object> { ["home"] = Home, ["appdata"] = appData }), "text"));
             Assert.Equal("ok", SignIn(mod));
             Assert.Null(Plugin.ModNote(mod, Host()));
             Directory.CreateDirectory(Path.Combine(Root, "library", "Free"));
@@ -398,7 +401,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("test_issuer", Json.Str(BeginSignIn(Decl(test)), "error"));
             var note = Plugin.ModNote(test, Host());
             Assert.Equal("Test build", Json.Str(note, "text"));
-            Assert.Equal("测试版", Json.Str(note, "text_zh"));
+            Assert.Equal("测试版", Json.Str(Plugin.ModNote(test, Host("zh-CN")), "text"));
             InLibrary("Gate test", test);
             var ex = Assert.Throws<InvalidOperationException>(() => Plugin.Run("license-login", new[] { "issuer.test" }, new StringWriter(), Host()));
             Assert.Contains("test build", ex.Message);
@@ -418,6 +421,21 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("none", Json.Str(StateOf(released), "state"));
             Assert.Equal("ok", SignIn(released));
             Assert.Equal("licensed", Json.Str(StateOf(released), "state"));
+        }
+
+        /// <summary>The name and summary in the language the manager asks for (Api 2: a language
+        /// tag), by the tag, then its language alone, then English.</summary>
+        [Fact]
+        public void The_title_and_summary_follow_the_language_tag()
+        {
+            Assert.Equal(2, Plugin.Api);
+            Assert.Equal("Member licenses", Plugin.Title("en"));
+            Assert.Equal("会员授权", Plugin.Title("zh-CN"));
+            Assert.Equal("Member licenses", Plugin.Title("zh-TW"));             // no zh-TW and no zh file: English
+            Assert.Equal("Member licenses", Plugin.Title("de"));
+            Assert.Equal("Member licenses", Plugin.Title(null));
+            Assert.Equal("部分 MOD 仅供作者的会员使用。首次使用需在作者的网站登录，授权到期前将自动续期。", Plugin.Summary("zh-CN"));
+            Assert.StartsWith("Some mods are available only to their author's members.", Plugin.Summary("de"));
         }
 
         /// <summary>Its commands, as the manager's command line runs them.</summary>

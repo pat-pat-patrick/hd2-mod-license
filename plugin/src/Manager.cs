@@ -9,8 +9,9 @@ namespace Hd2Qd.License
     // What the plugin adds to HD2 Mod Quick Deploy besides its card (Panel.cs): a word on the
     // rows of mods that need a license, the renewal at the manager's start, and the commands
     // license, license-login, license-renew and license-logout. The manager hands every call
-    // its host: home (its settings folder), appdata (the player's roaming AppData), zh, and
-    // library (a Func of every mod in its library: {name, path, enabled}).
+    // its host: home (its settings folder), appdata (the player's roaming AppData), lang (the
+    // language the manager shows, a language tag: Words.cs), and library (a Func of every mod
+    // in its library: {name, path, enabled}).
     public static partial class Plugin
     {
         static string Home(Dictionary<string, object> host) => (string)host["home"];
@@ -18,8 +19,6 @@ namespace Hd2Qd.License
         static string AppData(Dictionary<string, object> host) =>
             host.TryGetValue("appdata", out var a) && a is string s && s.Length > 0 ? s
             : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-
-        static bool Zh(Dictionary<string, object> host) => host.TryGetValue("zh", out var z) && z is bool b && b;
 
         static List<Dictionary<string, object>> LibraryOf(Dictionary<string, object> host) =>
             host.TryGetValue("library", out var f) && f is Func<List<Dictionary<string, object>>> read ? read() ?? new List<Dictionary<string, object>>()
@@ -77,10 +76,11 @@ namespace Hd2Qd.License
             string key = state == "expired" ? "row_license_expired" : state == "bad_declaration" ? "lic_bad_declaration"
                 : state == "test_issuer" ? "row_license_test" : "row_license";
             string tip = state == "test_issuer" ? "row_license_test_tip" : "row_license_tip";
+            string lang = Words.Lang(host);
             return new Dictionary<string, object>
             {
-                ["text"] = Words.Get(key, false), ["text_zh"] = Words.Get(key, true),
-                ["tip"] = Words.Get(tip, false), ["tip_zh"] = Words.Get(tip, true),
+                ["text"] = Words.Get(lang, key),
+                ["tip"] = Words.Get(lang, tip),
                 ["colour"] = "Yellow",
             };
         }

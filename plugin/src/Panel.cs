@@ -27,10 +27,10 @@ namespace Hd2Qd.License
 
         static string Until(long unix) => DateTimeOffset.FromUnixTimeSeconds(unix).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 
-        static string StateWords(string state, long expires, bool zh) =>
-            state == "licensed" ? Words.F("lic_licensed", zh, Until(expires))
-            : state == "expired" ? Words.F("lic_expired", zh, Until(expires))
-            : Words.Get("lic_" + state, zh);
+        static string StateWords(string state, long expires, string lang) =>
+            state == "licensed" ? Words.F(lang, "lic_licensed", Until(expires))
+            : state == "expired" ? Words.F(lang, "lic_expired", Until(expires))
+            : Words.Get(lang, "lic_" + state);
 
         static TextBlock Small(string text, Thickness margin) =>
             new TextBlock { Text = text, FontSize = 12, Foreground = Brush("Muted"), TextWrapping = TextWrapping.Wrap, Margin = margin };
@@ -52,14 +52,14 @@ namespace Hd2Qd.License
         /// <summary>The card's body: what the plugin is for, then each author.</summary>
         public static FrameworkElement Panel(Window owner, Dictionary<string, object> host)
         {
-            bool zh = Zh(host);
+            string lang = Words.Lang(host);
             string home = Home(host), appData = AppData(host);
             var panel = new StackPanel();
-            panel.Children.Add(Small(Words.Get("lic_intro", zh), new Thickness(0, 8, 0, 0)));
+            panel.Children.Add(Small(Words.Get(lang, "lic_intro"), new Thickness(0, 8, 0, 0)));
             var known = Known(home, LibraryOf(host));
             if (known.Count == 0)
             {
-                panel.Children.Add(Small(Words.Get("lic_nothing", zh), new Thickness(0, 8, 0, 0)));
+                panel.Children.Add(Small(Words.Get(lang, "lic_nothing"), new Thickness(0, 8, 0, 0)));
                 return panel;
             }
             foreach (var (decl, mods, folder) in known)
@@ -69,14 +69,14 @@ namespace Hd2Qd.License
                 var now = folder != null ? StateOf(home, appData, folder) : Status(home, appData, decl);
                 string state = Json.Str(now, "state") ?? "none";
                 bool busy = signingIn == issuer;
-                var line = Line(busy ? Words.Get("lic_waiting", zh) : StateWords(state, Json.Long(now, "expires"), zh),
+                var line = Line(busy ? Words.Get(lang, "lic_waiting") : StateWords(state, Json.Long(now, "expires"), lang),
                                 busy ? "Blue" : state == "licensed" ? "Blue" : "Yellow",
                                 Json.Str(decl, "name") + " · " + issuer + " · " +
-                                (mods.Count > 0 ? Words.F("lic_mods", zh, string.Join("、", mods)) : Words.Get("lic_no_mods", zh)));
+                                (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")));
                 var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 0, 0) };
                 if (busy)
                 {
-                    var cancel = new Button { Content = Words.Get("cancel", zh), Style = Style("Ghost"), MinHeight = 36 };
+                    var cancel = new Button { Content = Words.Get(lang, "cancel"), Style = Style("Ghost"), MinHeight = 36 };
                     cancel.Click += (s, e) => wait?.Cancel();
                     buttons.Children.Add(cancel);
                 }
@@ -88,7 +88,7 @@ namespace Hd2Qd.License
                     {
                         var signIn = new Button
                         {
-                            Content = Words.Get(state == "licensed" || state == "expired" ? "lic_sign_in_again" : "lic_sign_in", zh),
+                            Content = Words.Get(lang, state == "licensed" || state == "expired" ? "lic_sign_in_again" : "lic_sign_in"),
                             Style = Style(state == "licensed" ? "Ghost" : "Primary"), MinHeight = 36, IsEnabled = canSignIn && signingIn == null,
                         };
                         signIn.Click += (s, e) => SignIn(decl, host);
@@ -96,12 +96,12 @@ namespace Hd2Qd.License
                     }
                     if (state != "none" && state != "no_account" && state != "test_issuer")
                     {
-                        var signOut = new Button { Content = Words.Get("lic_sign_out", zh), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
+                        var signOut = new Button { Content = Words.Get(lang, "lic_sign_out"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
                         signOut.Click += (s, e) =>
                         {
-                            if (!Ask(host, Words.Get("lic_sign_out_ask", zh), Words.Get("lic_sign_out", zh))) return;
+                            if (!Ask(host, Words.Get(lang, "lic_sign_out_ask"), Words.Get(lang, "lic_sign_out"))) return;
                             try { Forget(home, appData, issuer); }
-                            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F("failed", zh, x.Message)); }
+                            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); }
                             Refresh(host);
                         };
                         buttons.Children.Add(signOut);
@@ -132,7 +132,7 @@ namespace Hd2Qd.License
         /// issuer's members' site, and the answer is waited for (10 minutes, or Cancel).</summary>
         static async void SignIn(Dictionary<string, object> decl, Dictionary<string, object> host)
         {
-            bool zh = Zh(host);
+            string lang = Words.Lang(host);
             string home = Home(host), appData = AppData(host), issuer = Json.Str(decl, "issuer");
             Dictionary<string, object> begin;
             List<string> accounts;
@@ -141,15 +141,15 @@ namespace Hd2Qd.License
                 begin = BeginSignIn(appData, decl);
                 accounts = Accounts(appData);
             }
-            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F("failed", zh, x.Message)); return; }
-            if (Json.Str(begin, "error") != null) { Tell(host, Words.Get("lic_" + Json.Str(begin, "error"), zh)); return; }
+            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); return; }
+            if (Json.Str(begin, "error") != null) { Tell(host, Words.Get(lang, "lic_" + Json.Str(begin, "error"))); return; }
             // the issuer learns the game account: said before anything is sent
-            if (!Ask(host, Words.F("lic_ask", zh, issuer, Json.Str(decl, "name"), accounts[0]), Words.Get("lic_sign_in", zh))) return;
+            if (!Ask(host, Words.F(lang, "lic_ask", issuer, Json.Str(decl, "name"), accounts[0]), Words.Get(lang, "lic_sign_in"))) return;
 
             signingIn = issuer;
             wait = new CancellationTokenSource();
             Refresh(host);
-            Foot(host, Words.Get("lic_waiting", zh), "Blue");
+            Foot(host, Words.Get(lang, "lic_waiting"), "Blue");
             Dictionary<string, object> r;
             try
             {
@@ -167,24 +167,24 @@ namespace Hd2Qd.License
                 wait = null;
             }
             var error = Json.Str(r, "error");
-            if (error == null) Foot(host, Words.F("lic_done", zh, Until(Json.Long(r, "expires"))), "Blue");
-            else if (error == "cancelled") Foot(host, Words.Get("lic_cancelled", zh), "Muted");
+            if (error == null) Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue");
+            else if (error == "cancelled") Foot(host, Words.Get(lang, "lic_cancelled"), "Muted");
             else
             {
-                Foot(host, ErrorWords(error, Json.Str(r, "detail"), zh), "Yellow");
-                Tell(host, ErrorWords(error, Json.Str(r, "detail"), zh));
+                Foot(host, ErrorWords(error, Json.Str(r, "detail"), lang), "Yellow");
+                Tell(host, ErrorWords(error, Json.Str(r, "detail"), lang));
             }
             Refresh(host);
         }
 
-        static string ErrorWords(string error, string detail, bool zh)
+        static string ErrorWords(string error, string detail, string lang)
         {
             switch (error)
             {
                 case "not_member": case "account_limit": case "denied": case "timeout": case "network": case "bad_license": case "key_changed":
-                    return Words.Get("lic_err_" + error, zh);
-                case "sign_in_again": case "unknown": return Words.Get("lic_err_sign_in_again", zh);
-                default: return Words.F("lic_err_other", zh, detail ?? error);
+                    return Words.Get(lang, "lic_err_" + error);
+                case "sign_in_again": case "unknown": return Words.Get(lang, "lic_err_sign_in_again");
+                default: return Words.F(lang, "lic_err_other", detail ?? error);
             }
         }
     }
