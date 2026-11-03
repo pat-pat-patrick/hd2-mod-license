@@ -375,7 +375,7 @@ namespace Hd2Qd.License.Tests
             var note = Plugin.ModNote(mod, Host());
             Assert.Equal("Needs a license", Json.Str(note, "text"));
             Assert.Equal("需要授权", Json.Str(Plugin.ModNote(mod, Host("zh-CN")), "text"));
-            Assert.Equal("仅供作者的会员使用：请在「插件」页登录（齿轮旁的拼图按钮）。", Json.Str(Plugin.ModNote(mod, Host("zh-CN")), "tip"));
+            Assert.Equal("仅供创作者的会员使用：请在「插件」页登录（齿轮旁的拼图按钮）。", Json.Str(Plugin.ModNote(mod, Host("zh-CN")), "tip"));
             Assert.Equal("Needs a license", Json.Str(Plugin.ModNote(mod, Host("de-AT")), "text"));   // no German: English
             Assert.Equal("Needs a license", Json.Str(Plugin.ModNote(mod, new Dictionary<string, object> { ["home"] = Home, ["appdata"] = appData }), "text"));
             Assert.Equal("ok", SignIn(mod));
@@ -434,7 +434,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("Member licenses", Plugin.Title("zh-TW"));             // no zh-TW and no zh file: English
             Assert.Equal("Member licenses", Plugin.Title("de"));
             Assert.Equal("Member licenses", Plugin.Title(null));
-            Assert.Equal("部分 MOD 仅供作者的会员使用。首次使用需在作者的网站登录，授权到期前将自动续期。", Plugin.Summary("zh-CN"));
+            Assert.Equal("部分 MOD 仅供创作者的会员使用。首次使用需在创作者的网站登录，授权到期前将自动续期。", Plugin.Summary("zh-CN"));
             Assert.StartsWith("Some mods are available only to their author's members.", Plugin.Summary("de"));
         }
 
