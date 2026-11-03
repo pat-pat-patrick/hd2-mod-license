@@ -11,7 +11,7 @@ Membership licenses for Helldivers 2 Lua mods. A player signs in to the mod auth
 - The manager writes the license to `%APPDATA%\Arrowhead\Helldivers2\licenses\<issuer>.txt` and renews it before it expires.
 - At load the mod runs `license_check.lua` once: signature (RSA-2048, SHA-256), issuer, expiry, and whether `Network.peer_id()` is one of the licensed accounts. It costs about 10 ms on the game's Lua 5.1.
 
-Each author runs their own issuer with their own key. The manager works with any issuer that answers the three endpoints in the specification.
+Each creator's licenses come from an issuer that signs with that creator's own key. The manager works with any issuer that answers the three endpoints in the specification. This repository holds no issuer.
 
 ## What it does not do
 
@@ -25,7 +25,6 @@ The signature stops anyone from forging a license. It does not stop someone from
 | [lua/license_check.lua](lua/license_check.lua) | The check, in readable form: plain Lua 5.1, no bit library, no ffi |
 | [dist/license_check.lua](dist/license_check.lua) | The same check, obfuscated — this is the file a mod embeds |
 | [tools/](tools/) | `build_check.py` turns the readable check into the obfuscated one |
-| [worker/](worker/) | An issuer for Cloudflare Workers, with Patreon as the members' list |
 | [plugin/](plugin/) | `HD2QD.License.dll`, the manager's side: a plugin of HD2 Mod Quick Deploy that signs the player in, writes and renews the license, and marks the mods that need one (`plugin\build.bat`) |
 | [fixtures/](fixtures/) | Test-only keys and licenses; they sign nothing real |
 
@@ -71,34 +70,9 @@ description, or an About/Credits screen:
 
 > Based on Prometheus by Elias Oelschner, https://github.com/prometheus-lua/Prometheus
 
-## Running an issuer
-
-The Worker uses only Cloudflare's free plan (Workers and KV).
-
-1. `node worker/make_key.mjs` makes your signing key in `%USERPROFILE%\hd2_license_keys`. Keep the private key out of every repository.
-2. Register a client in Patreon's developer portal, with the redirect URI `https://<your issuer>/callback`.
-3. Copy `worker/wrangler.example.toml` to `worker/wrangler.toml` and fill it in.
-4. In `worker/`, run:
-   - `npx wrangler login`
-   - `npx wrangler kv namespace create LICENSES`, and put the id into `wrangler.toml`
-   - `npx wrangler secret put PATREON_CLIENT_SECRET`
-   - `npx wrangler secret put SIGNING_KEY`, and paste `signing_key.private.txt`
-   - `npx wrangler secret put ADMIN_TOKEN`
-   - `npx wrangler deploy`
-5. `node worker/lua_key.mjs <signing_key.public.txt> <your issuer> "<your name>"` prints the key for your mod's Lua and the `hd2_license.json` for its package.
-
-Use your own domain: `*.workers.dev` cannot be reached from mainland China.
-
-### Admin requests
-
-Send them with the header `Authorization: Bearer <ADMIN_TOKEN>`.
-
-- `POST /admin/issue {"accounts": ["<id>"], "days": 365, "holder": "<name>"}` issues a license by hand, for example to a player without Patreon. The longest allowed is 3650 days.
-- `POST /admin/unbind {"holder": "p:<Patreon user id>"}` clears a member's bound accounts, so they can sign in from another game account.
-
 ## Tests
 
-`node worker/test.mjs` runs the issuer's flows against an in-memory KV and a fake Patreon. `node worker/make_fixtures.mjs` replaces the fixtures.
+`pluginuild.bat` runs the plugin's tests. The fixtures are test-only keys and licenses made by the issuer's tooling; they sign nothing real.
 
 ## License
 
