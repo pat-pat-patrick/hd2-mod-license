@@ -209,6 +209,7 @@ namespace Hd2Qd.License
             {
                 case "not_member": return "the issuer says this account is not an active member (or its tier is too low)";
                 case "account_limit": return "the membership has as many game accounts as the issuer allows: another can replace one some time after the last was added (the sign-in page says when), or ask the author to free one";
+                case "banned": return "the creator has stopped licensing this membership or game account: contact the creator if this is a mistake";
                 case "denied": return "access was not granted on the members' site";
                 case "sign_in_again": case "unknown": return "the issuer asks to sign in again (license-login)";
                 case "timeout": return "no answer from the sign-in within 10 minutes";

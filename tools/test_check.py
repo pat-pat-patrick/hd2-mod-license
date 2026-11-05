@@ -56,7 +56,11 @@ class Suite:
 
     def put(self, text):
         name = ".\\Arrowhead\\Helldivers2\\licenses\\issuer.test.txt"
-        with open(os.path.join(self.cwd, name), "w", encoding="utf-8") as f:
+        path = os.path.join(self.cwd, name)
+        # on Windows the backslashes are folders, which must exist; on Linux the
+        # name is one file in the working directory, whose folder exists already
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             f.write(text)
 
     def state(self, prelude="", peer="os.time"):

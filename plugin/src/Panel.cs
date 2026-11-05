@@ -196,7 +196,7 @@ namespace Hd2Qd.License
         {
             switch (error)
             {
-                case "not_member": case "account_limit": case "denied": case "timeout": case "network": case "bad_license": case "key_changed":
+                case "not_member": case "account_limit": case "banned": case "denied": case "timeout": case "network": case "bad_license": case "key_changed":
                     return Words.Get(lang, "lic_err_" + error);
                 case "sign_in_again": case "unknown": return Words.Get(lang, "lic_err_sign_in_again");
                 default: return Words.F(lang, "lic_err_other", detail ?? error);
