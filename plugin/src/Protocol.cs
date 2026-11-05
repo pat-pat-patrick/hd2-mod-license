@@ -35,7 +35,8 @@ namespace Hd2Qd.License
 
         const string FileName = "hd2_license.json", Header = "HD2 MOD LICENSE 1\n", StoreName = "licenses.json";
         static readonly Regex Issuer = new Regex(@"^(?:[a-z0-9][a-z0-9.-]*|(?:localhost|127\.0\.0\.1):\d{1,5})$");
-        static readonly Regex Account = new Regex("^[0-9a-f]{16}$");
+        // 16 hex digits, at least 8 of them significant: a placeholder id (0, ...) is no account
+        static readonly Regex Account = new Regex("^(?!0{8})[0-9a-f]{16}$");
         // names reserved for tests and examples (RFC 2606, RFC 6761): no members' site can ever
         // answer there. localhost:port is not one of them: an author tries their own issuer there.
         static readonly Regex Reserved = new Regex(@"(?:^|\.)(?:test|example|invalid|localhost|example\.(?:com|net|org))$");
@@ -61,7 +62,7 @@ namespace Hd2Qd.License
             var issuer = Json.Str(d, "issuer")?.Trim().ToLowerInvariant();
             var key = Json.Str(d, "key")?.Trim().ToLowerInvariant().TrimStart('0');
             if (Json.Long(d, "protocol") != 1 || issuer == null || !Issuer.IsMatch(issuer)
-                || key == null || !Regex.IsMatch(key, "^[0-9a-f]{500,1024}$"))
+                || key == null || !Regex.IsMatch(key, "^[89a-f][0-9a-f]{511}$"))   // RSA-2048, as the mod's check takes
                 return Err("bad_declaration");
             var name = Json.Str(d, "name")?.Trim();
             return new Dictionary<string, object> { ["issuer"] = issuer, ["name"] = string.IsNullOrEmpty(name) ? issuer : name, ["key"] = key };
@@ -125,56 +126,109 @@ namespace Hd2Qd.License
 
         // -- signing in --------------------------------------------------------------------
 
-        /// <summary>Step one: {url, nonce}; the manager opens url in the browser, where the player
-        /// signs in to the issuer's members' site. {error: "no_account"} when the game has not
-        /// made a settings file here yet; {error: "test_issuer"} for a test build's issuer.</summary>
+        /// <summary>A sign-in under way, between BeginSignIn and FinishSignIn: where the browser
+        /// comes back, and the secrets only this computer knows.</summary>
+        sealed class SignInSession
+        {
+            public Loopback Loopback;
+            public string Verifier, State;
+        }
+
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SignInSession> Sessions =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, SignInSession>();
+
+        /// <summary>Step one: {url, session}. It listens on 127.0.0.1 for the browser's return
+        /// and makes the address the manager opens in the browser, where the player signs in to
+        /// the issuer's members' site (OAuth for native apps, RFC 8252: a loopback redirect with
+        /// PKCE). {error: "no_account"} when the game has not made a settings file here yet;
+        /// {error: "test_issuer"} for a test build's issuer; {error: "other", detail} when it
+        /// cannot listen. FinishSignIn or AbandonSignIn ends the session.</summary>
         public static Dictionary<string, object> BeginSignIn(string appData, Dictionary<string, object> decl)
         {
             if (TestIssuer(Json.Str(decl, "issuer"))) return Err("test_issuer");
             var accounts = Accounts(appData);
             if (accounts.Count == 0) return Err("no_account");
-            var nonce = Hex(Random(16));
-            var url = Base(Json.Str(decl, "issuer")) + "/login?n=" + nonce + "&acct=" + accounts[0];
-            return new Dictionary<string, object> { ["url"] = url, ["nonce"] = nonce };
+            Loopback loopback;
+            try { loopback = new Loopback(); }
+            catch (System.Net.Sockets.SocketException e) { return new Dictionary<string, object> { ["error"] = "other", ["detail"] = e.Message }; }
+            var s = new SignInSession { Loopback = loopback, Verifier = Hex(Random(32)), State = Hex(Random(16)) };
+            var session = Hex(Random(16));
+            Sessions[session] = s;
+            var url = Base(Json.Str(decl, "issuer")) + "/login?c=" + Sha256Hex(s.Verifier) + "&s=" + s.State
+                      + "&port=" + loopback.Port + "&acct=" + accounts[0];
+            return new Dictionary<string, object> { ["url"] = url, ["session"] = session };
         }
 
-        /// <summary>Step two: waits for the issuer's answer (it asks every 2 s, up to
-        /// timeoutSeconds), checks the license against the declared key, writes it where the
-        /// mods read it and keeps the renew token. {ok: true, expires} or {error}: the issuer's
-        /// own (not_member, account_limit, denied), "timeout", "cancelled", "network",
-        /// "bad_license".</summary>
+        /// <summary>Ends a sign-in that will not be finished (the player said no, the browser
+        /// would not open): it stops listening. Nothing when it has ended already.</summary>
+        public static void AbandonSignIn(string session)
+        {
+            if (session != null && Sessions.TryRemove(session, out var s)) s.Loopback.Dispose();
+        }
+
+        /// <summary>Step two: waits for the browser to come back (up to timeoutSeconds), collects
+        /// the license with the code it brings and the verifier kept here, checks it against the
+        /// declared key, writes it where the mods read it and keeps the renew token; then answers
+        /// the browser with a page saying how it went, in lang. {ok: true, expires} or {error}:
+        /// the issuer's own (not_member, account_limit with wait_days, denied, unknown),
+        /// "timeout", "cancelled", "network", "bad_license".</summary>
         public static Dictionary<string, object> FinishSignIn(string home, string appData, Dictionary<string, object> decl,
-                                                              string nonce, int timeoutSeconds, CancellationToken cancel)
+                                                              string session, int timeoutSeconds, CancellationToken cancel, string lang = null)
+        {
+            if (session == null || !Sessions.TryRemove(session, out var s)) return Err("cancelled");
+            using (s.Loopback)
+            {
+                Loopback.Return back;
+                try { back = s.Loopback.Receive(s.State, DateTime.UtcNow.AddSeconds(timeoutSeconds), cancel); }
+                catch (OperationCanceledException) { return Err("cancelled"); }
+                if (back == null) return Err("timeout");
+                var r = Claim(home, appData, decl, back, s.Verifier);
+                back.Reply(Page(r, lang));
+                return r;
+            }
+        }
+
+        static Dictionary<string, object> Claim(string home, string appData, Dictionary<string, object> decl, Loopback.Return back, string verifier)
         {
             string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key");
-            var until = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-            while (true)
-            {
-                if (cancel.IsCancellationRequested) return Err("cancelled");
-                var (status, body) = Post(issuer, "/claim", new Dictionary<string, object> { ["n"] = nonce });
-                if (status == 200 || status == 403)
-                {
-                    if (status == 403 || body == null) return Err(Json.Str(body, "error") ?? "network");
-                    var text = Json.Str(body, "license");
-                    var renew = Json.Str(body, "renew");
-                    var f = text == null ? null : Verify(text, issuer, key);
-                    if (f == null || renew == null) return Err("bad_license");
-                    WriteLicense(appData, issuer, key, text);
-                    var rec = IssuerRecord(home, issuer) ?? new Dictionary<string, object>();
-                    rec["key"] = key;
-                    rec["name"] = Json.Str(decl, "name");
-                    var members = Json.Obj(rec, "members") ?? new Dictionary<string, object>();
-                    members[Holder(f)] = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(renew), Salt, DataProtectionScope.CurrentUser));
-                    rec["members"] = members;
-                    SaveIssuer(home, issuer, rec);
-                    return new Dictionary<string, object> { ["ok"] = true, ["expires"] = long.Parse(f["expires"]) };
-                }
-                // an issuer out of reach is asked again until the time is up: a dropped
-                // connection while the player signs in is not the end of it
-                if (status != 404 && status != 0) return Err("network");
-                if (DateTime.UtcNow >= until) return Err(status == 0 ? "network" : "timeout");
-                if (cancel.WaitHandle.WaitOne(2000)) return Err("cancelled");
-            }
+            if (back["error"] is string refused)
+                return WithWait(Err(Regex.IsMatch(refused, "^[a-z_]{1,32}$") ? refused : "other"), back["wait_days"]);
+            var code = back["code"];
+            if (code == null || !Regex.IsMatch(code, "^[0-9a-f]{32}$")) return Err("other");
+            var (status, body) = Post(issuer, "/claim", new Dictionary<string, object> { ["code"] = code, ["verifier"] = verifier });
+            if (status == 403) return WithWait(Err(Json.Str(body, "error") ?? "network"), Json.Long(body, "wait_days").ToString());
+            if (status != 200 || body == null) return Err("network");
+            var text = Json.Str(body, "license");
+            var renew = Json.Str(body, "renew");
+            var f = text == null ? null : Verify(text, issuer, key);
+            if (f == null || renew == null) return Err("bad_license");
+            WriteLicense(appData, issuer, key, text);
+            var rec = IssuerRecord(home, issuer) ?? new Dictionary<string, object>();
+            rec["key"] = key;
+            rec["name"] = Json.Str(decl, "name");
+            var members = Json.Obj(rec, "members") ?? new Dictionary<string, object>();
+            members[Holder(f)] = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(renew), Salt, DataProtectionScope.CurrentUser));
+            rec["members"] = members;
+            SaveIssuer(home, issuer, rec);
+            return new Dictionary<string, object> { ["ok"] = true, ["expires"] = long.Parse(f["expires"]) };
+        }
+
+        /// <summary>account_limit's wait, in days, when the issuer gave one.</summary>
+        static Dictionary<string, object> WithWait(Dictionary<string, object> r, string days)
+        {
+            if (Json.Str(r, "error") == "account_limit" && long.TryParse(days, out var d) && d > 0 && d < 100000) r["wait_days"] = d;
+            return r;
+        }
+
+        /// <summary>The page the browser is left on: how the sign-in went, and to go back to the manager.</summary>
+        static string Page(Dictionary<string, object> r, string lang)
+        {
+            lang = lang ?? "en";
+            var error = Json.Str(r, "error");
+            string text = error == null ? Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))) : ErrorWords(r, lang);
+            return "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>HD2 MOD</title>"
+                   + "<body style='font:16px system-ui;margin:3em auto;max-width:36em;padding:0 1em'><p>"
+                   + System.Net.WebUtility.HtmlEncode(text) + "</p><p>" + System.Net.WebUtility.HtmlEncode(Words.Get(lang, "lic_page_close")) + "</p>";
         }
 
         /// <summary>Renews each member's license here when half its time has passed (or always,
@@ -297,7 +351,8 @@ namespace Hd2Qd.License
                 if (eq > 0) f[line.Substring(0, eq)] = line.Substring(eq + 1);
             }
             if (!f.TryGetValue("issuer", out var iss) || iss != issuer) return null;
-            if (!f.ContainsKey("accounts") || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)) return null;
+            if (!f.ContainsKey("accounts") || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)
+                || !f.TryGetValue("issued", out var iss2) || !long.TryParse(iss2, out _)) return null;
             var modulus = Bytes(key);
             if (!Regex.IsMatch(sig, "^[0-9a-fA-F]+$") || sig.Length != modulus.Length * 2) return null;
             using (var rsa = new RSACng())
@@ -428,6 +483,11 @@ namespace Hd2Qd.License
         }
 
         static string Hex(byte[] b) => string.Concat(b.Select(x => x.ToString("x2")));
+
+        static string Sha256Hex(string text)
+        {
+            using (var sha = SHA256.Create()) return Hex(sha.ComputeHash(Encoding.ASCII.GetBytes(text)));
+        }
 
         static byte[] Bytes(string hex)
         {

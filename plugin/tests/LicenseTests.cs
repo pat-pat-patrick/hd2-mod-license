@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Hd2Qd.License;
 using Xunit;
 
@@ -47,8 +48,8 @@ namespace Hd2Qd.License.Tests
         Dictionary<string, object> Status(Dictionary<string, object> decl) => Plugin.Status(Home, appData, decl);
         List<string> Accounts() => Plugin.Accounts(appData);
         Dictionary<string, object> BeginSignIn(Dictionary<string, object> decl) => Plugin.BeginSignIn(appData, decl);
-        Dictionary<string, object> FinishSignIn(Dictionary<string, object> decl, string nonce, TimeSpan wait, CancellationToken cancel) =>
-            Plugin.FinishSignIn(Home, appData, decl, nonce, (int)wait.TotalSeconds, cancel);
+        Dictionary<string, object> FinishSignIn(Dictionary<string, object> decl, string session, TimeSpan wait, CancellationToken cancel) =>
+            Plugin.FinishSignIn(Home, appData, decl, session, (int)wait.TotalSeconds, cancel, "en");
         Dictionary<string, object> Renew(Dictionary<string, object> decl, bool force) => Plugin.Renew(Home, appData, decl, force);
         void Forget(string issuerName) => Plugin.Forget(Home, appData, issuerName);
 
@@ -88,12 +89,16 @@ namespace Hd2Qd.License.Tests
 
         Dictionary<string, object> Decl(string folder) => Plugin.Declaration(folder);
 
+        Dictionary<string, object> last;
+
         string SignIn(string folder)
         {
             var begin = BeginSignIn(Decl(folder));
             Assert.Null(Json.Str(begin, "error"));
             issuer.Opened(Json.Str(begin, "url"));
-            var r = FinishSignIn(Decl(folder), Json.Str(begin, "nonce"), TimeSpan.FromSeconds(10), CancellationToken.None);
+            var r = FinishSignIn(Decl(folder), Json.Str(begin, "session"), TimeSpan.FromSeconds(10), CancellationToken.None);
+            issuer.BrowserDone();
+            last = r;
             return Json.Str(r, "error") ?? "ok";
         }
 
@@ -109,6 +114,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("Test Author", Json.Str(d, "name"));
             Assert.Equal(KeyN("a"), Json.Str(d, "key"));
             Assert.Equal("bad_declaration", Json.Str(Decl(LicensedMod("Short", text: "{\"protocol\":1,\"issuer\":\"x.test\",\"key\":\"abcd\"}")), "error"));
+            Assert.Equal("bad_declaration", Json.Str(Decl(LicensedMod("Key1024", text: "{\"protocol\":1,\"issuer\":\"x.test\",\"key\":\"" + KeyN("a").Substring(0, 256) + "\"}")), "error"));
             Assert.Equal("bad_declaration", Json.Str(Decl(LicensedMod("V2", text: "{\"protocol\":2,\"issuer\":\"x.test\",\"key\":\"" + KeyN("a") + "\"}")), "error"));
             Assert.Equal("bad_declaration", Json.Str(Decl(LicensedMod("Path", issuerName: "..\\x")), "error"));
             Assert.Equal("bad_declaration", Json.Str(Decl(LicensedMod("Port", issuerName: "evil.test:8080")), "error"));
@@ -125,6 +131,7 @@ namespace Hd2Qd.License.Tests
             var saves = Path.Combine(appData, "Arrowhead", "Helldivers2", "saves");
             File.WriteAllText(Path.Combine(saves, "user_settings.config"), "");
             File.WriteAllText(Path.Combine(saves, "nothex0000000000_user_settings.config"), "");
+            File.WriteAllText(Path.Combine(saves, "0000000000000001_user_settings.config"), "");
             File.WriteAllText(Path.Combine(saves, A + "_user_settings.config.old"), "");
             Assert.Equal(new[] { B, A }, Accounts());
         }
@@ -140,9 +147,9 @@ namespace Hd2Qd.License.Tests
             Account(A);
             Assert.Equal("none", Json.Str(StateOf(mod), "state"));
 
-            issuer.PendingClaims = 2;
             Assert.Equal("ok", SignIn(mod));
-            Assert.Equal("/login?n=" + issuer.Nonce + "&acct=" + A, issuer.OpenedPath);
+            Assert.Matches("^/login\\?c=[0-9a-f]{64}&s=[0-9a-f]{32}&port=[0-9]+&acct=" + A + "$", issuer.OpenedPath);
+            Assert.Contains("You can close this page", issuer.BrowserPage);
             Assert.True(File.Exists(LicenseFile));
             Assert.StartsWith("HD2 MOD LICENSE 1\nissuer=" + issuer.Name + "\n", File.ReadAllText(LicenseFile));
             var st = StateOf(mod);
@@ -166,6 +173,40 @@ namespace Hd2Qd.License.Tests
                 Assert.Equal(why, SignIn(mod));
             }
             Assert.False(File.Exists(LicenseFile));
+            issuer.ClaimError = "account_limit";
+            issuer.WaitDays = 3;
+            Assert.Equal("account_limit", SignIn(mod));
+            Assert.Equal(3L, Json.Long(last, "wait_days"));
+            Assert.Contains("in 3 days", issuer.BrowserPage);
+        }
+
+        /// <summary>The loopback sign-in: the browser comes back to this computer with a code,
+        /// and the license is collected with the verifier only this computer has.</summary>
+        [Fact]
+        public void The_browser_comes_back_here_and_only_the_verifier_collects()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            issuer.StrayFirst = true;                      // another page pokes the port first
+            Assert.Equal("ok", SignIn(mod));
+            Assert.Equal(2, issuer.StraysAnswered404);
+            Assert.True(issuer.VerifierMatched);
+
+            issuer.StrayFirst = false;
+            issuer.SpoilVerifier = true;                   // what /claim does when the verifier is not the one
+            Assert.Equal("unknown", SignIn(mod));
+        }
+
+        [Fact]
+        public void An_abandoned_sign_in_stops_listening()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            var begin = BeginSignIn(Decl(mod));
+            int port = int.Parse(System.Text.RegularExpressions.Regex.Match(Json.Str(begin, "url"), "port=([0-9]+)").Groups[1].Value);
+            Plugin.AbandonSignIn(Json.Str(begin, "session"));
+            Assert.Throws<SocketException>(() => new TcpClient().Connect(IPAddress.Loopback, port));
+            Assert.Equal("cancelled", Json.Str(FinishSignIn(Decl(mod), Json.Str(begin, "session"), TimeSpan.FromSeconds(1), CancellationToken.None), "error"));
         }
 
         [Fact]
@@ -185,8 +226,9 @@ namespace Hd2Qd.License.Tests
             var mod = LicensedMod();
             Account(A);
             var begin = BeginSignIn(Decl(mod));
-            issuer.Dispose();
-            var r = FinishSignIn(Decl(mod), Json.Str(begin, "nonce"), TimeSpan.FromSeconds(5), CancellationToken.None);
+            issuer.Opened(Json.Str(begin, "url"));         // the browser comes back with a code
+            issuer.Dispose();                              // but the issuer cannot be reached to collect it
+            var r = FinishSignIn(Decl(mod), Json.Str(begin, "session"), TimeSpan.FromSeconds(5), CancellationToken.None);
             Assert.Equal("network", Json.Str(r, "error"));
         }
 
@@ -195,12 +237,13 @@ namespace Hd2Qd.License.Tests
         {
             var mod = LicensedMod();
             Account(A);
-            issuer.PendingClaims = int.MaxValue;
+            issuer.BrowserComesBack = false;              // the player never finishes in the browser
             var begin = BeginSignIn(Decl(mod));
             issuer.Opened(Json.Str(begin, "url"));
             using (var cancel = new CancellationTokenSource(300))
-                Assert.Equal("cancelled", Json.Str(FinishSignIn(Decl(mod), Json.Str(begin, "nonce"), TimeSpan.FromSeconds(30), cancel.Token), "error"));
-            Assert.Equal("timeout", Json.Str(FinishSignIn(Decl(mod), Json.Str(begin, "nonce"), TimeSpan.Zero, CancellationToken.None), "error"));
+                Assert.Equal("cancelled", Json.Str(FinishSignIn(Decl(mod), Json.Str(begin, "session"), TimeSpan.FromSeconds(30), cancel.Token), "error"));
+            begin = BeginSignIn(Decl(mod));
+            Assert.Equal("timeout", Json.Str(FinishSignIn(Decl(mod), Json.Str(begin, "session"), TimeSpan.Zero, CancellationToken.None), "error"));
         }
 
         // -- states --------------------------------------------------------------------------
@@ -476,14 +519,22 @@ namespace Hd2Qd.License.Tests
             readonly Thread thread;
             volatile bool stopped;
             public readonly string Name;
-            public string Nonce, OpenedPath, ClaimError, RenewError, SignWith = "a", LastRenewToken;
+            public string OpenedPath, ClaimError, RenewError, SignWith = "a", LastRenewToken, BrowserPage;
+            public long WaitDays;
+            /// <summary>The browser: whether it comes back from the sign-in at all, whether another
+            /// page pokes the port first, and what it saw.</summary>
+            public bool BrowserComesBack = true, StrayFirst, SpoilVerifier, VerifierMatched;
+            public int StraysAnswered404;
+            Task browser = Task.CompletedTask;
+            /// <summary>Codes given to the browser, with the challenge of the sign-in they end.</summary>
+            readonly Dictionary<string, string> codes = new Dictionary<string, string>();
             /// <summary>Who signs in next: their holder, accounts and renew token.</summary>
             public string Holder = "p:1", RenewToken = new string('7', 64);
             public string[] Accounts = { A };
             /// <summary>Every member signed in so far, by renew token: what renewal signs for.</summary>
             public readonly Dictionary<string, (string Holder, string[] Accounts)> Members = new Dictionary<string, (string, string[])>();
             public readonly List<string> Renewed = new List<string>();
-            public int PendingClaims, RenewCalls;
+            public int RenewCalls;
             public readonly int Days = 30;
 
             public Issuer(LicensePlugin t)
@@ -496,11 +547,54 @@ namespace Hd2Qd.License.Tests
                 thread.Start();
             }
 
+            /// <summary>The browser opens the sign-in address; the member signs in at once, and the
+            /// issuer sends the browser back to the manager's port, in the background.</summary>
             public void Opened(string url)
             {
                 var u = new Uri(url);
                 OpenedPath = u.PathAndQuery;
-                Nonce = u.Query.Split('&')[0].Substring(3);
+                var q = u.Query.TrimStart('?').Split('&').Select(p => p.Split('=')).ToDictionary(p => p[0], p => p[1]);
+                if (!BrowserComesBack) return;
+                string back;
+                if (ClaimError != null)
+                    back = "error=" + ClaimError + (WaitDays > 0 ? "&wait_days=" + WaitDays : "");
+                else
+                {
+                    var code = Guid.NewGuid().ToString("N");
+                    lock (codes) codes[code] = q["c"];
+                    back = "code=" + code;
+                }
+                int port = int.Parse(q["port"]);
+                string state = q["s"];
+                bool stray = StrayFirst;
+                browser = Task.Run(() =>
+                {
+                    if (stray)
+                    {
+                        if (Get(port, "/favicon.ico").StartsWith("HTTP/1.1 404")) StraysAnswered404++;
+                        if (Get(port, "/done?s=" + new string('0', 32) + "&code=" + new string('1', 32)).StartsWith("HTTP/1.1 404")) StraysAnswered404++;
+                    }
+                    BrowserPage = Get(port, "/done?s=" + state + "&" + back);
+                });
+            }
+
+            public void BrowserDone() => browser.Wait(5000);
+
+            static string Get(int port, string target)
+            {
+                using (var c = new TcpClient())
+                {
+                    c.Connect(IPAddress.Loopback, port);
+                    var s = c.GetStream();
+                    var req = Encoding.ASCII.GetBytes("GET " + target + " HTTP/1.1\r\nHost: 127.0.0.1:" + port + "\r\nConnection: close\r\n\r\n");
+                    s.Write(req, 0, req.Length);
+                    using (var reader = new StreamReader(s, Encoding.UTF8)) return reader.ReadToEnd();
+                }
+            }
+
+            static string Sha256Hex(string text)
+            {
+                using (var sha = SHA256.Create()) return string.Concat(sha.ComputeHash(Encoding.ASCII.GetBytes(text)).Select(b => b.ToString("x2")));
             }
 
             public string License(string key, string[] accounts, int days, string holder = "p:1", string issuerName = null)
@@ -520,9 +614,14 @@ namespace Hd2Qd.License.Tests
             {
                 if (path == "/claim")
                 {
-                    if (Json.Str(body, "n") != Nonce) return (400, new Dictionary<string, object> { ["error"] = "bad_request" });
-                    if (PendingClaims > 0) { PendingClaims--; return (404, new Dictionary<string, object> { ["pending"] = true }); }
-                    if (ClaimError != null) return (403, new Dictionary<string, object> { ["error"] = ClaimError });
+                    string code = Json.Str(body, "code"), verifier = Json.Str(body, "verifier"), challenge;
+                    lock (codes)
+                    {
+                        if (code == null || !codes.TryGetValue(code, out challenge)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
+                        codes.Remove(code);
+                    }
+                    VerifierMatched = verifier != null && Sha256Hex(verifier) == challenge;
+                    if (!VerifierMatched || SpoilVerifier) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
                     Members[RenewToken] = (Holder, Accounts);
                     return (200, new Dictionary<string, object> { ["license"] = License(SignWith, Accounts, Days, Holder), ["renew"] = RenewToken });
                 }

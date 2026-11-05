@@ -129,12 +129,19 @@ namespace Hd2Qd.License
                     var decl = IssuerArg(home, library, args[0]);
                     var begin = BeginSignIn(appData, decl);
                     if (Json.Str(begin, "error") == "no_account") throw new InvalidOperationException("no game account on this computer yet: start the game once, then sign in");
-                    if (Json.Str(begin, "error") != null) throw new InvalidOperationException(CommandError(Json.Str(begin, "error")));
-                    o.WriteLine("your browser opens " + Json.Str(decl, "issuer") + ", the issuer of " + Json.Str(decl, "name") + "; it learns your game account id (" + Accounts(appData)[0] + ")");
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Json.Str(begin, "url")) { UseShellExecute = true });
-                    var r = FinishSignIn(home, appData, decl, Json.Str(begin, "nonce"), 600, CancellationToken.None);
+                    if (Json.Str(begin, "error") != null) throw new InvalidOperationException(CommandError(Json.Str(begin, "error")) + (Json.Str(begin, "detail") is string d ? ": " + d : ""));
+                    var session = Json.Str(begin, "session");
+                    Dictionary<string, object> r;
+                    try
+                    {
+                        o.WriteLine("your browser opens " + Json.Str(decl, "issuer") + ", the issuer of " + Json.Str(decl, "name") + "; it learns your game account id (" + Accounts(appData)[0] + ")");
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Json.Str(begin, "url")) { UseShellExecute = true });
+                        r = FinishSignIn(home, appData, decl, session, 600, CancellationToken.None, "en");
+                    }
+                    finally { AbandonSignIn(session); }
                     var error = Json.Str(r, "error");
-                    if (error != null) throw new InvalidOperationException(CommandError(error));
+                    if (error != null)
+                        throw new InvalidOperationException(CommandError(error) + (Json.Long(r, "wait_days") > 0 ? " (" + Json.Long(r, "wait_days") + " more days before an account can be replaced)" : ""));
                     o.WriteLine("licensed until " + When(Json.Long(r, "expires")));
                     return 0;
                 }
@@ -201,7 +208,7 @@ namespace Hd2Qd.License
             switch (error)
             {
                 case "not_member": return "the issuer says this account is not an active member (or its tier is too low)";
-                case "account_limit": return "the membership has as many game accounts as the issuer allows: ask the author to free one";
+                case "account_limit": return "the membership has as many game accounts as the issuer allows: another can replace one some time after the last was added (the sign-in page says when), or ask the author to free one";
                 case "denied": return "access was not granted on the members' site";
                 case "sign_in_again": case "unknown": return "the issuer asks to sign in again (license-login)";
                 case "timeout": return "no answer from the sign-in within 10 minutes";

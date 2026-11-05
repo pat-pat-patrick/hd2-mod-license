@@ -3,3 +3,4 @@ signing_key.*
 plugin/**/bin/
 plugin/**/obj/
 plugin/release/
+dist/

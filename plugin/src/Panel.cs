@@ -142,9 +142,15 @@ namespace Hd2Qd.License
                 accounts = Accounts(appData);
             }
             catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); return; }
+            if (Json.Str(begin, "error") == "other") { Tell(host, Words.F(lang, "failed", Json.Str(begin, "detail"))); return; }
             if (Json.Str(begin, "error") != null) { Tell(host, Words.Get(lang, "lic_" + Json.Str(begin, "error"))); return; }
+            var session = Json.Str(begin, "session");
             // the issuer learns the game account: said before anything is sent
-            if (!Ask(host, Words.F(lang, "lic_ask", issuer, Json.Str(decl, "name"), accounts[0]), Words.Get(lang, "lic_sign_in"))) return;
+            if (!Ask(host, Words.F(lang, "lic_ask", issuer, Json.Str(decl, "name"), accounts[0]), Words.Get(lang, "lic_sign_in")))
+            {
+                AbandonSignIn(session);
+                return;
+            }
 
             signingIn = issuer;
             wait = new CancellationTokenSource();
@@ -155,7 +161,7 @@ namespace Hd2Qd.License
             {
                 Process.Start(new ProcessStartInfo(Json.Str(begin, "url")) { UseShellExecute = true });
                 var token = wait.Token;
-                r = await Task.Run(() => FinishSignIn(home, appData, decl, Json.Str(begin, "nonce"), 600, token));
+                r = await Task.Run(() => FinishSignIn(home, appData, decl, session, 600, token, lang));
             }
             catch (Exception x) when (x is System.ComponentModel.Win32Exception || x is System.IO.IOException || x is UnauthorizedAccessException)
             {
@@ -163,6 +169,7 @@ namespace Hd2Qd.License
             }
             finally
             {
+                AbandonSignIn(session);        // the browser would not open: stop listening
                 signingIn = null;
                 wait = null;
             }
@@ -171,10 +178,18 @@ namespace Hd2Qd.License
             else if (error == "cancelled") Foot(host, Words.Get(lang, "lic_cancelled"), "Muted");
             else
             {
-                Foot(host, ErrorWords(error, Json.Str(r, "detail"), lang), "Yellow");
-                Tell(host, ErrorWords(error, Json.Str(r, "detail"), lang));
+                Foot(host, ErrorWords(r, lang), "Yellow");
+                Tell(host, ErrorWords(r, lang));
             }
             Refresh(host);
+        }
+
+        /// <summary>A failed sign-in in words: {error, detail?, wait_days?}.</summary>
+        static string ErrorWords(Dictionary<string, object> r, string lang)
+        {
+            long wait = Json.Long(r, "wait_days");
+            if (Json.Str(r, "error") == "account_limit" && wait > 0) return Words.F(lang, "lic_err_account_limit_wait", wait);
+            return ErrorWords(Json.Str(r, "error"), Json.Str(r, "detail"), lang);
         }
 
         static string ErrorWords(string error, string detail, string lang)
