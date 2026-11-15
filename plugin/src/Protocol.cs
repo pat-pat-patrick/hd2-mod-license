@@ -198,6 +198,15 @@ namespace Hd2Qd.License
             var (status, body) = Post(issuer, "/claim", new Dictionary<string, object> { ["code"] = code, ["verifier"] = verifier });
             if (status == 403) return WithWait(Err(Json.Str(body, "error") ?? "network"), Json.Long(body, "wait_days").ToString());
             if (status != 200 || body == null) return Err("network");
+            return Keep(home, appData, decl, body);
+        }
+
+        /// <summary>A license the issuer gave ({license, renew}): checked against the declared key,
+        /// written where the mods read it, and its renew token kept for its member.
+        /// {ok: true, expires} or {error: "bad_license"}.</summary>
+        static Dictionary<string, object> Keep(string home, string appData, Dictionary<string, object> decl, Dictionary<string, object> body)
+        {
+            string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key");
             var text = Json.Str(body, "license");
             var renew = Json.Str(body, "renew");
             var f = text == null ? null : Verify(text, issuer, key);
@@ -211,6 +220,49 @@ namespace Hd2Qd.License
             rec["members"] = members;
             SaveIssuer(home, issuer, rec);
             return new Dictionary<string, object> { ["ok"] = true, ["expires"] = long.Parse(f["expires"]) };
+        }
+
+        // -- activation codes ----------------------------------------------------------------
+
+        const string CodeAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+        /// <summary>An activation code as typed, in its 20 characters, or null when it is not one.
+        /// A code is 19 characters of Crockford's Base32 and a check character: the first 5 bits
+        /// of the SHA-256 of "hd2 license code\n" and the 19 (spec/protocol.zh-CN.md). Case,
+        /// spaces and dashes are ignored, O reads as 0 and I and L as 1.</summary>
+        public static string NormalizeCode(string typed)
+        {
+            if (typed == null) return null;
+            var s = new string(typed.ToUpperInvariant().Where(c => !char.IsWhiteSpace(c) && c != '-')
+                .Select(c => c == 'O' ? '0' : c == 'I' || c == 'L' ? '1' : c).ToArray());
+            if (s.Length != 20 || s.Any(c => CodeAlphabet.IndexOf(c) < 0)) return null;
+            using (var sha = SHA256.Create())
+            {
+                var d = sha.ComputeHash(Encoding.ASCII.GetBytes("hd2 license code\n" + s.Substring(0, 19)));
+                return s[19] == CodeAlphabet[d[0] >> 3] ? s : null;
+            }
+        }
+
+        /// <summary>Activates with a code the author gave (for example in a sponsorship platform's
+        /// reply after paying), instead of signing in through the browser: the issuer finds whom the
+        /// code was given to and answers as a sign-in does. {ok: true, expires} or {error}:
+        /// "bad_code" (mistyped, nothing was sent), "no_account", "test_issuer", the issuer's own
+        /// (unknown_code, not_member, account_limit with wait_days, banned), "no_codes" (the issuer
+        /// takes no codes), "network", "bad_license".</summary>
+        public static Dictionary<string, object> Redeem(string home, string appData, Dictionary<string, object> decl, string typed)
+        {
+            if (TestIssuer(Json.Str(decl, "issuer"))) return Err("test_issuer");
+            var code = NormalizeCode(typed);
+            if (code == null) return Err("bad_code");
+            var accounts = Accounts(appData);
+            if (accounts.Count == 0) return Err("no_account");
+            var (status, body) = Post(Json.Str(decl, "issuer"), "/redeem", new Dictionary<string, object> { ["code"] = code, ["acct"] = accounts[0] });
+            string error = Json.Str(body, "error");
+            if (status == 404) return Err("no_codes");                  // an issuer that has no /redeem, or takes no codes
+            if (status == 400) return Err(error == "bad_code" ? "bad_code" : "other");
+            if (status == 403) return WithWait(Err(error != null && Regex.IsMatch(error, "^[a-z_]{1,32}$") ? error : "other"), Json.Long(body, "wait_days").ToString());
+            if (status != 200 || body == null) return Err("network");
+            return Keep(home, appData, decl, body);
         }
 
         /// <summary>account_limit's wait, in days, when the issuer gave one.</summary>

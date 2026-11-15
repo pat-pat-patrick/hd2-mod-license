@@ -93,6 +93,13 @@ namespace Hd2Qd.License
                         };
                         signIn.Click += (s, e) => SignIn(decl, host);
                         buttons.Children.Add(signIn);
+                        var redeem = new Button
+                        {
+                            Content = Words.Get(lang, "lic_redeem"), Style = Style("Ghost"), MinHeight = 36,
+                            Margin = new Thickness(8, 0, 0, 0), IsEnabled = canSignIn && signingIn == null,
+                        };
+                        redeem.Click += (s, e) => RedeemCode(owner, decl, host);
+                        buttons.Children.Add(redeem);
                     }
                     if (state != "none" && state != "no_account" && state != "test_issuer")
                     {
@@ -184,6 +191,68 @@ namespace Hd2Qd.License
             Refresh(host);
         }
 
+        /// <summary>Activating with a code: asked for (saying what the issuer learns), checked here
+        /// for typos, then sent. A mistyped code is asked for again with what was typed.</summary>
+        static async void RedeemCode(Window owner, Dictionary<string, object> decl, Dictionary<string, object> host)
+        {
+            string lang = Words.Lang(host);
+            string home = Home(host), appData = AppData(host), issuer = Json.Str(decl, "issuer");
+            List<string> accounts;
+            try { accounts = Accounts(appData); }
+            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); return; }
+            if (accounts.Count == 0) { Tell(host, Words.Get(lang, "lic_no_account")); return; }
+            string typed = "";
+            while (true)
+            {
+                typed = AskText(owner, host, Words.F(lang, "lic_redeem_ask", issuer, Json.Str(decl, "name"), accounts[0]), Words.Get(lang, "lic_redeem_action"), typed);
+                if (typed == null) return;
+                if (NormalizeCode(typed) != null) break;
+                Tell(host, Words.Get(lang, "lic_err_bad_code"));
+            }
+
+            signingIn = issuer;
+            Refresh(host);
+            Foot(host, Words.Get(lang, "lic_redeem_waiting"), "Blue");
+            Dictionary<string, object> r;
+            try { r = await Task.Run(() => Redeem(home, appData, decl, typed)); }
+            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException)
+            {
+                r = new Dictionary<string, object> { ["error"] = "other", ["detail"] = x.Message };
+            }
+            finally { signingIn = null; }
+            var error = Json.Str(r, "error");
+            if (error == null) Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue");
+            else
+            {
+                var words = error == "no_account" || error == "test_issuer" ? Words.Get(lang, "lic_" + error) : ErrorWords(r, lang);
+                Foot(host, words, "Yellow");
+                Tell(host, words);
+            }
+            Refresh(host);
+        }
+
+        /// <summary>A line typed in: the manager's own box when it offers one (host "ask_text"),
+        /// else a plain window of this plugin's. Null when cancelled.</summary>
+        static string AskText(Window owner, Dictionary<string, object> host, string text, string action, string start)
+        {
+            if (Get<Func<string, string, string, string>>(host, "ask_text") is Func<string, string, string, string> ask) return ask(text, action, start);
+            var box = new TextBox { Text = start ?? "", FontSize = 14, Padding = new Thickness(6, 4, 6, 4), Margin = new Thickness(0, 12, 0, 0) };
+            var ok = new Button { Content = action, IsDefault = true, MinWidth = 90, Margin = new Thickness(0, 16, 8, 0) };
+            var cancel = new Button { Content = Words.Get(Words.Lang(host), "cancel"), IsCancel = true, MinWidth = 90, Margin = new Thickness(0, 16, 0, 0) };
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            row.Children.Add(ok);
+            row.Children.Add(cancel);
+            var body = new StackPanel { Margin = new Thickness(20) };
+            body.Children.Add(new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 460 });
+            body.Children.Add(box);
+            body.Children.Add(row);
+            var w = new Window { Owner = owner, Content = body, SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize,
+                                 WindowStartupLocation = owner != null ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen, Title = action, ShowInTaskbar = false };
+            ok.Click += (s, e) => w.DialogResult = true;
+            w.Loaded += (s, e) => { box.Focus(); box.SelectAll(); };
+            return w.ShowDialog() == true ? box.Text : null;
+        }
+
         /// <summary>A failed sign-in in words: {error, detail?, wait_days?}.</summary>
         static string ErrorWords(Dictionary<string, object> r, string lang)
         {
@@ -197,6 +266,7 @@ namespace Hd2Qd.License
             switch (error)
             {
                 case "not_member": case "account_limit": case "banned": case "denied": case "timeout": case "network": case "bad_license": case "key_changed":
+                case "bad_code": case "unknown_code": case "no_codes":
                     return Words.Get(lang, "lic_err_" + error);
                 case "sign_in_again": case "unknown": return Words.Get(lang, "lic_err_sign_in_again");
                 default: return Words.F(lang, "lic_err_other", detail ?? error);

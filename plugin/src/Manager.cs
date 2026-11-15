@@ -102,6 +102,7 @@ namespace Hd2Qd.License
         {
             new[] { "license", "the licenses the library's mods need (a mod with hd2_license.json is for its author's members): each issuer, whether this computer has its license and until when, and the mods that use it" },
             new[] { "license-login", "sign in to a mod author's issuer (license-login ISSUER, its name or a mod that uses it): your browser opens the author's members' site, and the license goes where the mods read it" },
+            new[] { "license-redeem", "activate with the code a mod author gave you (license-redeem ISSUER CODE, the issuer's name or a mod that uses it), instead of signing in through the browser" },
             new[] { "license-renew", "renew the licenses that are half way to their end (--force: every one now)" },
             new[] { "license-logout", "remove an issuer's license and sign-in from this computer (license-logout ISSUER)" },
         };
@@ -140,6 +141,21 @@ namespace Hd2Qd.License
                     }
                     finally { AbandonSignIn(session); }
                     var error = Json.Str(r, "error");
+                    if (error != null)
+                        throw new InvalidOperationException(CommandError(error) + (Json.Long(r, "wait_days") > 0 ? " (" + Json.Long(r, "wait_days") + " more days before an account can be replaced)" : ""));
+                    o.WriteLine("licensed until " + When(Json.Long(r, "expires")));
+                    return 0;
+                }
+                case "license-redeem":
+                {
+                    if (args.Length != 2) { o.WriteLine("usage: hd2qd license-redeem ISSUER CODE"); return 2; }
+                    var decl = IssuerArg(home, library, args[0]);
+                    var mine = Accounts(appData);
+                    if (mine.Count > 0 && NormalizeCode(args[1]) != null)
+                        o.WriteLine("the code goes to " + Json.Str(decl, "issuer") + ", the issuer of " + Json.Str(decl, "name") + "; it learns your game account id (" + mine[0] + ")");
+                    var r = Redeem(home, appData, decl, args[1]);
+                    var error = Json.Str(r, "error");
+                    if (error == "no_account") throw new InvalidOperationException("no game account on this computer yet: start the game once, then activate");
                     if (error != null)
                         throw new InvalidOperationException(CommandError(error) + (Json.Long(r, "wait_days") > 0 ? " (" + Json.Long(r, "wait_days") + " more days before an account can be replaced)" : ""));
                     o.WriteLine("licensed until " + When(Json.Long(r, "expires")));
@@ -217,6 +233,9 @@ namespace Hd2Qd.License
                 case "bad_license": return "the issuer's license is not signed by the key the mod declares";
                 case "key_changed": return "a mod declares another key than the one signed in with: check where it came from";
                 case "test_issuer": return "this is a test build's issuer: nobody can sign in there; use the author's released build";
+                case "bad_code": return "not a valid activation code: check that it is complete and typed correctly (nothing was sent)";
+                case "unknown_code": return "the issuer does not recognise this activation code (if you have just paid, try again in a minute)";
+                case "no_codes": return "this issuer takes no activation codes: use license-login";
                 default: return "the sign-in failed: " + error;
             }
         }

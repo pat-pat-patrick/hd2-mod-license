@@ -180,6 +180,91 @@ namespace Hd2Qd.License.Tests
             Assert.Contains("in 3 days", issuer.BrowserPage);
         }
 
+        // -- activation codes ----------------------------------------------------------------
+
+        /// <summary>The code is checked here as the issuer's codes.js checks it: its codes pass,
+        /// in any case, with spaces, and with O for 0 and I or L for 1; a typo does not.</summary>
+        [Fact]
+        public void An_activation_code_is_checked_here_as_the_issuer_checks_it()
+        {
+            // made by the issuer's codes.js make()
+            foreach (var code in new[] { "G94PE-RCH4P-THXB5-21DB9", "B63BK-BQSN7-G7E3G-1MF3W", "RHJFT-FBB5Z-9005M-K49QB", "S9Z57-X4YM2-5CJPH-2FNJ2", "82QKS-Q2BMF-FEJ0V-B4TM0" })
+                Assert.Equal(code.Replace("-", ""), Plugin.NormalizeCode(code));
+            Assert.Equal("G94PERCH4PTHXB521DB9", Plugin.NormalizeCode(" g94pe rch4p thxb5 21db9 "));
+            Assert.Equal("RHJFTFBB5Z9005MK49QB", Plugin.NormalizeCode("RHJFT-FBB5Z-9OO5M-K49QB"));
+            Assert.Equal("B63BKBQSN7G7E3G1MF3W", Plugin.NormalizeCode("B63BK-BQSN7-G7E3G-LMF3W"));
+            Assert.Null(Plugin.NormalizeCode("G94PE-RCH4P-THXB5-21DB8"));      // the check character
+            Assert.Null(Plugin.NormalizeCode("G94PE-RCH4P-THXB6-21DB9"));      // one character
+            Assert.Null(Plugin.NormalizeCode("G94PE-RCH4P-THXB5-21DB"));       // short
+            Assert.Null(Plugin.NormalizeCode("G94PE-RCH4P-THXB5-21DBU"));      // U is not in the alphabet
+            Assert.Null(Plugin.NormalizeCode(""));
+            Assert.Null(Plugin.NormalizeCode(null));
+        }
+
+        [Fact]
+        public void Activating_with_a_code_writes_the_license_as_a_sign_in_does()
+        {
+            var mod = LicensedMod();
+            Assert.Equal("no_account", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), "G94PE-RCH4P-THXB5-21DB9"), "error"));
+            Account(A);
+            issuer.Holder = "f:" + new string('a', 32);
+            var r = Plugin.Redeem(Home, appData, Decl(mod), "g94pe rch4p thxb5 21db9");
+            Assert.Null(Json.Str(r, "error"));
+            Assert.Equal("G94PERCH4PTHXB521DB9", issuer.RedeemedCode);
+            Assert.Equal(A, issuer.RedeemedAcct);
+            Assert.Equal("licensed", Json.Str(StateOf(mod), "state"));
+            Assert.Contains("holder=f:" + new string('a', 32), File.ReadAllText(LicenseFile));
+            Assert.DoesNotContain(issuer.RenewToken, File.ReadAllText(Path.Combine(Home, "licenses.json")));
+
+            // renewed later like any sign-in, with no code
+            Assert.True(Json.Bool(Renew(Decl(mod), true), "renewed"));
+            Assert.Equal(issuer.RenewToken, issuer.LastRenewToken);
+        }
+
+        [Fact]
+        public void A_code_is_refused_by_name_and_a_mistyped_one_is_never_sent()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("bad_code", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), "G94PE-RCH4P-THXB5-21DB8"), "error"));
+            Assert.Equal(0, issuer.RedeemCalls);
+            Assert.Equal("unknown_code", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), "B63BK-BQSN7-G7E3G-1MF3W"), "error"));
+            foreach (var why in new[] { "not_member", "banned" })
+            {
+                issuer.RedeemError = why;
+                Assert.Equal(why, Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            }
+            issuer.RedeemError = "account_limit";
+            issuer.WaitDays = 4;
+            var limit = Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode);
+            Assert.Equal("account_limit", Json.Str(limit, "error"));
+            Assert.Equal(4L, Json.Long(limit, "wait_days"));
+            issuer.RedeemError = null;
+            issuer.NoRedeem = true;
+            Assert.Equal("no_codes", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            Assert.False(File.Exists(LicenseFile));
+            issuer.NoRedeem = false;
+            issuer.SignWith = "b";
+            Assert.Equal("bad_license", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            Assert.False(File.Exists(LicenseFile));
+            Assert.Equal("test_issuer", Json.Str(Plugin.Redeem(Home, appData, Decl(LicensedMod("Test", issuerName: "issuer.test")), issuer.KnownCode), "error"));
+        }
+
+        [Fact]
+        public void The_redeem_command_activates_and_says_until_when()
+        {
+            var mod = LicensedMod();
+            InLibrary("Licensed", mod);
+            Account(A);
+            var o = new StringWriter();
+            Assert.Equal(0, Plugin.Run("license-redeem", new[] { issuer.Name, issuer.KnownCode }, o, Host()));
+            Assert.Contains("learns your game account id (" + A + ")", o.ToString());
+            Assert.Contains("licensed until", o.ToString());
+            var e = Assert.Throws<InvalidOperationException>(() => Plugin.Run("license-redeem", new[] { "Licensed", "G94PE-RCH4P-THXB5-21DB8" }, new StringWriter(), Host()));
+            Assert.Contains("nothing was sent", e.Message);
+            Assert.Equal(2, Plugin.Run("license-redeem", new[] { issuer.Name }, new StringWriter(), Host()));
+        }
+
         /// <summary>The loopback sign-in: the browser comes back to this computer with a code,
         /// and the license is collected with the verifier only this computer has.</summary>
         [Fact]
@@ -477,7 +562,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("Member licenses", Plugin.Title("zh-TW"));             // no zh-TW and no zh file: English
             Assert.Equal("Member licenses", Plugin.Title("de"));
             Assert.Equal("Member licenses", Plugin.Title(null));
-            Assert.Equal("部分 MOD 仅供创作者的会员使用。首次使用需在创作者的网站登录，授权到期前将自动续期。", Plugin.Summary("zh-CN"));
+            Assert.Equal("部分 MOD 仅供创作者的会员使用。首次使用需在创作者的网站登录，或输入创作者提供的激活码，授权到期前将自动续期。", Plugin.Summary("zh-CN"));
             Assert.StartsWith("Some mods are available only to their author's members.", Plugin.Summary("de"));
         }
 
@@ -491,7 +576,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(0, Plugin.Run("license", new string[0], o, Host()));
             Assert.Contains("Test Author (" + issuer.Name + "): not signed in here", o.ToString());
             Assert.Contains("mods: Licensed", o.ToString());
-            Assert.Equal(new[] { "license", "license-login", "license-renew", "license-logout" }, Plugin.Commands.Select(c => c[0]));
+            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-logout" }, Plugin.Commands.Select(c => c[0]));
         }
 
         /// <summary>At the manager's start a license half way to its end is renewed.</summary>
@@ -535,6 +620,11 @@ namespace Hd2Qd.License.Tests
             public readonly Dictionary<string, (string Holder, string[] Accounts)> Members = new Dictionary<string, (string, string[])>();
             public readonly List<string> Renewed = new List<string>();
             public int RenewCalls;
+            /// <summary>/redeem: the one code it knows (made by the issuer's codes.js), what came,
+            /// and how it answers instead (an error, or 404 as an issuer without codes).</summary>
+            public string KnownCode = "G94PERCH4PTHXB521DB9", RedeemedCode, RedeemedAcct, RedeemError;
+            public bool NoRedeem;
+            public int RedeemCalls;
             public readonly int Days = 30;
 
             public Issuer(LicensePlugin t)
@@ -622,6 +712,18 @@ namespace Hd2Qd.License.Tests
                     }
                     VerifierMatched = verifier != null && Sha256Hex(verifier) == challenge;
                     if (!VerifierMatched || SpoilVerifier) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
+                    Members[RenewToken] = (Holder, Accounts);
+                    return (200, new Dictionary<string, object> { ["license"] = License(SignWith, Accounts, Days, Holder), ["renew"] = RenewToken });
+                }
+                if (path == "/redeem")
+                {
+                    RedeemCalls++;
+                    if (NoRedeem) return (404, new Dictionary<string, object> { ["error"] = "not_found" });
+                    RedeemedCode = Json.Str(body, "code");
+                    RedeemedAcct = Json.Str(body, "acct");
+                    if (RedeemError != null)
+                        return (403, new Dictionary<string, object> { ["error"] = RedeemError, ["wait_days"] = WaitDays });
+                    if (RedeemedCode != KnownCode) return (403, new Dictionary<string, object> { ["error"] = "unknown_code" });
                     Members[RenewToken] = (Holder, Accounts);
                     return (200, new Dictionary<string, object> { ["license"] = License(SignWith, Accounts, Days, Holder), ["renew"] = RenewToken });
                 }
