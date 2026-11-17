@@ -1,6 +1,6 @@
 # HD2 Mod License
 
-Membership licenses for Helldivers 2 Lua mods. A player signs in to the mod author's own issuer from HD2 Mod Quick Deploy and receives a signed license; the mod checks it offline when it loads. Nothing goes over the network while the game runs.
+Membership licenses for Helldivers 2 Lua mods. A player signs in to the mod author's own issuer from HD2 Mod Quick Deploy and receives a signed license; the mod checks it when it loads. A mod may also ask, once each game, whether the membership is still active (the online check): the manager carries the question to the issuer and the signed answer back. The game itself never goes over the network for it.
 
 **Status: draft 1 (2026-11-02).** The specification is written in Chinese; an English translation will follow.
 
@@ -11,7 +11,10 @@ Membership licenses for Helldivers 2 Lua mods. A player signs in to the mod auth
 - The manager writes the license to `%APPDATA%\Arrowhead\Helldivers2\licenses\<issuer>.txt` and renews it before it expires.
 - At load the mod runs its build of `license_check.lua` once: signature (RSA-2048, SHA-256), issuer, expiry, and whether `Network.peer_id()` is one of the licensed accounts. It costs about 10 ms on the game's Lua 5.1.
 
-Each creator's licenses come from an issuer that signs with that creator's own key. The manager works with any issuer that answers the three endpoints in the specification. This repository holds no issuer.
+- The online check (plugin 1.5.0, specification section 7): the mod writes a question with a fresh nonce and its account to `licenses\<issuer>.ask`. The manager asks the issuer's `/attest` with the member's renew token and writes the issuer's answer, signed together with the nonce and the issuer's own time, to `licenses\<issuer>.attest`. An old answer fits no new question, so changing the computer's clock gets nowhere while the manager runs. The mod decides what happens without an answer; the reference gate runs for up to 3 days after the last answer, by the computer's clock.
+- An account the license does not name yet is bound by its question when the membership has a free place, and the license naming it comes with the answer. The Steam ID the official game shows at its start (HellForge uses it as the account) goes with the question for the game account and takes no place of its own.
+
+Each creator's licenses come from an issuer that signs with that creator's own key. The manager works with any issuer that answers the endpoints in the specification. This repository holds no issuer.
 
 ## What it does not do
 

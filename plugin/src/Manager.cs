@@ -90,6 +90,9 @@ namespace Hd2Qd.License
         /// runs to its end); the next start tries again. True when one was renewed.</summary>
         public static bool Start(Dictionary<string, object> host)
         {
+            // (1.5.0) the mods' questions answered from now on (Attest.cs)
+            try { Watch(host); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
             bool any = false;
             foreach (var (decl, _, _) in Issuers(LibraryOf(host)))
                 try { any |= Json.Bool(Renew(Home(host), AppData(host), decl, false), "renewed"); }
@@ -104,6 +107,7 @@ namespace Hd2Qd.License
             new[] { "license-login", "sign in to a mod author's issuer (license-login ISSUER, its name or a mod that uses it): your browser opens the author's members' site, and the license goes where the mods read it" },
             new[] { "license-redeem", "activate with the code a mod author gave you (license-redeem ISSUER CODE, the issuer's name or a mod that uses it), instead of signing in through the browser" },
             new[] { "license-renew", "renew the licenses that are half way to their end (--force: every one now)" },
+            new[] { "license-answer", "answer the question a licensed mod asked at its start (the manager does this by itself while it runs)" },
             new[] { "license-logout", "remove an issuer's license and sign-in from this computer (license-logout ISSUER)" },
         };
 
@@ -174,6 +178,16 @@ namespace Hd2Qd.License
                             : "not due, or not signed in here"));
                     }
                     return 0;
+                case "license-answer":
+                    foreach (var (decl, _, _) in Issuers(library))
+                    {
+                        var r = Answer(home, appData, decl);
+                        var error = Json.Str(r, "error");
+                        o.WriteLine(Json.Str(decl, "issuer") + ": " + (error != null ? CommandError(error)
+                            : Json.Bool(r, "answered") ? "answered, the issuer's time " + When(Json.Long(r, "time"))
+                            : "nothing to answer (" + Json.Str(r, "why") + ")"));
+                    }
+                    return 0;
                 case "license-logout":
                 {
                     if (args.Length != 1) { o.WriteLine("usage: hd2qd license-logout ISSUER"); return 2; }
@@ -236,6 +250,8 @@ namespace Hd2Qd.License
                 case "bad_code": return "not a valid activation code: check that it is complete and typed correctly (nothing was sent)";
                 case "unknown_code": return "the issuer does not recognise this activation code (if you have just paid, try again in a minute)";
                 case "no_codes": return "this issuer takes no activation codes: use license-login";
+                case "account": return "this game account is not bound to the membership signed in here (license-login with it)";
+                case "bad_answer": return "the issuer's answer is not signed by the key the mod declares";
                 default: return "the sign-in failed: " + error;
             }
         }

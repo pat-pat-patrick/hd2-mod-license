@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Hd2Qd.License;
@@ -551,6 +552,140 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("licensed", Json.Str(StateOf(released), "state"));
         }
 
+        // -- the online check (1.5.0, spec section 7) ---------------------------------------
+
+        string AskFile => Path.Combine(appData, "Arrowhead", "Helldivers2", "licenses", issuer.Name.Replace(':', '_') + ".ask");
+        string AttestFile => Path.Combine(appData, "Arrowhead", "Helldivers2", "licenses", issuer.Name.Replace(':', '_') + ".attest");
+
+        /// <summary>The question a mod writes at its start.</summary>
+        void Ask(string nonce, string account, int minutesAgo = 0)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(AskFile));
+            File.WriteAllText(AskFile, "HD2 MOD ASK 1\nnonce=" + nonce + "\naccount=" + account + "\n");
+            File.SetLastWriteTimeUtc(AskFile, DateTime.UtcNow.AddMinutes(-minutesAgo));
+        }
+
+        Dictionary<string, object> AnswerNow(string folder) => Plugin.Answer(Home, appData, Decl(folder));
+
+        [Fact]
+        public void A_mods_question_is_answered_signed_and_only_once()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("no_question", Json.Str(AnswerNow(mod), "why"));
+            Assert.Equal("ok", SignIn(mod));
+            var n = new string('a', 32);
+            Ask(n, A);
+            var r = AnswerNow(mod);
+            Assert.True(Json.Bool(r, "answered"));
+            Assert.Equal(n, issuer.LastAttestNonce);
+            Assert.StartsWith("HD2 MOD ATTEST 1\nissuer=" + issuer.Name + "\nnonce=" + n + "\naccount=" + A + "\n", File.ReadAllText(AttestFile));
+            Assert.Contains("\nsig=", File.ReadAllText(AttestFile));
+            int calls = issuer.AttestCalls;
+            Assert.Equal("answered", Json.Str(AnswerNow(mod), "why"));      // the same question: not asked again
+            Ask(new string('b', 32), A, minutesAgo: 11);
+            Assert.Equal("old", Json.Str(AnswerNow(mod), "why"));           // from a game that ended long ago
+            File.WriteAllText(AskFile, "HD2 MOD ASK 1\nnonce=xyz\naccount=" + A + "\n");
+            Assert.Equal("malformed", Json.Str(AnswerNow(mod), "why"));
+            Assert.Equal(calls, issuer.AttestCalls);
+        }
+
+        [Fact]
+        public void An_answer_not_signed_by_the_declared_key_is_not_written()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.SignWith = "b";
+            Ask(new string('a', 32), A);
+            Assert.Equal("bad_answer", Json.Str(AnswerNow(mod), "error"));
+            Assert.Contains("error=bad_answer", File.ReadAllText(AttestFile));
+            Assert.DoesNotContain("sig=", File.ReadAllText(AttestFile));
+        }
+
+        [Fact]
+        public void A_refusal_is_written_for_the_mod_and_no_answer_leaves_the_last_one()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            issuer.Accounts = new[] { A, B };                               // both places taken
+            Assert.Equal("ok", SignIn(mod));
+            Ask(new string('c', 32), A);
+            Assert.True(Json.Bool(AnswerNow(mod), "answered"));
+            var good = File.ReadAllText(AttestFile);
+
+            issuer.AttestError = "not_member";
+            Ask(new string('d', 32), A);
+            Assert.Equal("not_member", Json.Str(AnswerNow(mod), "error"));
+            Assert.Equal("HD2 MOD ATTEST 1\nnonce=" + new string('d', 32) + "\nerror=not_member\n", File.ReadAllText(AttestFile));
+            issuer.AttestError = null;
+
+            Ask(new string('e', 32), "1234567890abcdef");                   // a third account: no place free
+            Assert.Equal("account", Json.Str(AnswerNow(mod), "error"));
+
+            File.WriteAllText(AttestFile, good);
+            Ask(new string('f', 32), A);
+            issuer.Dispose();                                                // the issuer cannot be reached
+            Assert.Equal("network", Json.Str(AnswerNow(mod), "error"));
+            Assert.Equal(good, File.ReadAllText(AttestFile));               // the last answer stays: the mod's grace
+        }
+
+        [Fact]
+        public void A_second_account_is_bound_by_its_question_and_its_license_written()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));                                // bound: A alone
+            Ask(new string('a', 32), B);                                     // HellForge's account: the Steam ID
+            Assert.True(Json.Bool(AnswerNow(mod), "answered"));
+            Assert.Contains("account=" + B, File.ReadAllText(AttestFile));
+            Assert.Contains("accounts=" + A + "," + B + "\n", File.ReadAllText(LicenseFile));
+            Assert.Single(Regex.Matches(File.ReadAllText(LicenseFile), "HD2 MOD LICENSE 1"));   // the member's own replaced
+        }
+
+        [Fact]
+        public void The_Steam_ID_the_game_showed_goes_with_the_question_and_nothing_else_does()
+        {
+            // (2026-11-17) the official game shows the Steam ID before the account: the issuer
+            // keeps it beside the account, so HellForge (whose account it is) takes no place
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            Directory.CreateDirectory(Path.GetDirectoryName(AskFile));
+            File.WriteAllText(AskFile, "HD2 MOD ASK 1\nnonce=" + new string('a', 32) + "\naccount=" + A + "\nsteam=0110000100abcdef\n");
+            Assert.True(Json.Bool(AnswerNow(mod), "answered"));
+            Assert.Equal("0110000100abcdef", issuer.LastAttestSteam);
+            File.WriteAllText(AskFile, "HD2 MOD ASK 1\nnonce=" + new string('b', 32) + "\naccount=" + A + "\nsteam=0220000100abcdef\n");
+            Assert.True(Json.Bool(AnswerNow(mod), "answered"));               // no Steam ID: the question stands without it
+            Assert.Null(issuer.LastAttestSteam);
+        }
+
+        [Fact]
+        public void Nobody_signed_in_here_is_told_to_sign_in()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Ask(new string('a', 32), A);
+            Assert.Equal("sign_in_again", Json.Str(AnswerNow(mod), "error"));
+            Assert.Equal(0, issuer.AttestCalls);
+            Assert.Contains("error=sign_in_again", File.ReadAllText(AttestFile));
+        }
+
+        [Fact]
+        public void The_manager_answers_a_question_as_soon_as_a_mod_writes_it()
+        {
+            var mod = LicensedMod();
+            InLibrary("Licensed", mod);
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            Plugin.Watch(Host());
+            var n = new string('9', 32);
+            Ask(n, A);
+            var until = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < until && !(File.Exists(AttestFile) && File.ReadAllText(AttestFile).Contains("nonce=" + n))) Thread.Sleep(50);
+            Assert.Contains("nonce=" + n, File.ReadAllText(AttestFile));
+        }
+
         /// <summary>The name and summary in the language the manager asks for (Api 2: a language
         /// tag), by the tag, then its language alone, then English.</summary>
         [Fact]
@@ -576,7 +711,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(0, Plugin.Run("license", new string[0], o, Host()));
             Assert.Contains("Test Author (" + issuer.Name + "): not signed in here", o.ToString());
             Assert.Contains("mods: Licensed", o.ToString());
-            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-logout" }, Plugin.Commands.Select(c => c[0]));
+            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-answer", "license-logout" }, Plugin.Commands.Select(c => c[0]));
         }
 
         /// <summary>At the manager's start a license half way to its end is renewed.</summary>
@@ -625,6 +760,9 @@ namespace Hd2Qd.License.Tests
             public string KnownCode = "G94PERCH4PTHXB521DB9", RedeemedCode, RedeemedAcct, RedeemError;
             public bool NoRedeem;
             public int RedeemCalls;
+            /// <summary>/attest: what it was asked, and the refusal it gives instead of an answer.</summary>
+            public int AttestCalls;
+            public string AttestError, LastAttestNonce, LastAttestSteam;
             public readonly int Days = 30;
 
             public Issuer(LicensePlugin t)
@@ -700,8 +838,44 @@ namespace Hd2Qd.License.Tests
                 }
             }
 
+            public string Attest(string key, string nonce, string account, string holder, long time)
+            {
+                var text = "HD2 MOD ATTEST 1" + NL + "issuer=" + Name + NL + "nonce=" + nonce + NL + "account=" + account + NL +
+                           "time=" + time + NL + "holder=" + holder + NL;
+                var pkcs8 = Convert.FromBase64String(Json.Str(Json.Obj(t.keys, key), "pkcs8"));
+                using (var rsa = new RSACng(CngKey.Import(pkcs8, CngKeyBlobFormat.Pkcs8PrivateBlob)))
+                {
+                    var sig = rsa.SignData(Encoding.UTF8.GetBytes(text), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    return text + "sig=" + string.Concat(sig.Select(b => b.ToString("x2"))) + NL;
+                }
+            }
+
+            static readonly string NL = ((char)10).ToString();
+
             (int, object) Answer(string path, Dictionary<string, object> body)
             {
+                if (path == "/attest")
+                {
+                    AttestCalls++;
+                    LastAttestNonce = Json.Str(body, "nonce");
+                    LastAttestSteam = Json.Str(body, "steam");
+                    if (AttestError != null) return (403, new Dictionary<string, object> { ["error"] = AttestError });
+                    if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var am)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
+                    var acct = Json.Str(body, "account");
+                    if (!am.Accounts.Contains(acct))
+                    {
+                        // as the issuer: a free place binds the account, and its license comes along
+                        if (am.Accounts.Length >= 2) return (403, new Dictionary<string, object> { ["error"] = "account" });
+                        am = (am.Holder, am.Accounts.Concat(new[] { acct }).ToArray());
+                        Members[Json.Str(body, "renew")] = am;
+                        return (200, new Dictionary<string, object>
+                        {
+                            ["attest"] = Attest(SignWith, LastAttestNonce, acct, am.Holder, DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+                            ["license"] = License(SignWith, am.Accounts, Days, am.Holder),
+                        });
+                    }
+                    return (200, new Dictionary<string, object> { ["attest"] = Attest(SignWith, LastAttestNonce, Json.Str(body, "account"), am.Holder, DateTimeOffset.UtcNow.ToUnixTimeSeconds()) });
+                }
                 if (path == "/claim")
                 {
                     string code = Json.Str(body, "code"), verifier = Json.Str(body, "verifier"), challenge;
