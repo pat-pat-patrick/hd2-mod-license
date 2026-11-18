@@ -711,7 +711,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(0, Plugin.Run("license", new string[0], o, Host()));
             Assert.Contains("Test Author (" + issuer.Name + "): not signed in here", o.ToString());
             Assert.Contains("mods: Licensed", o.ToString());
-            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-answer", "license-logout" }, Plugin.Commands.Select(c => c[0]));
+            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-segments", "license-answer", "license-logout" }, Plugin.Commands.Select(c => c[0]));
         }
 
         /// <summary>At the manager's start a license half way to its end is renewed.</summary>
@@ -726,6 +726,212 @@ namespace Hd2Qd.License.Tests
             long expires = Json.Long(StateOf(mod), "expires");
             SetClock(() => expires - issuer.Days * 86400 / 2 + 1);
             Assert.True(Plugin.Start(Host()));
+        }
+
+        // -- (1.6.0) per-account segments ------------------------------------------------------
+
+        /// <summary>A licensed mod that ships its Lua as segments: hd2_license.json with
+        /// "segments", and the version in manifest.json's Name.</summary>
+        string SealedMod(string version = "v1.2.0", string name = "Sealed", string id = "sealed-mod", int count = 8)
+        {
+            var folder = Path.Combine(Root, "library", name);
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, "hd2_license.json"), Json.Write(new Dictionary<string, object>
+            {
+                ["protocol"] = 1L, ["issuer"] = issuer.Name, ["name"] = "Test Author", ["key"] = KeyN("a"),
+                ["segments"] = new Dictionary<string, object> { ["id"] = id, ["count"] = (long)count }, ["integrity"] = 1L,
+            }));
+            File.WriteAllText(Path.Combine(folder, "manifest.json"), "{\"Version\":1,\"Name\":\"" + name + " " + version + "\"}");
+            return folder;
+        }
+
+        string SegDir(string version = "v1.2.0", string id = "sealed-mod") => Plugin.SegmentsFolder(appData, issuer.Name, id, version);
+        Dictionary<string, object> Claim(string folder, bool force = false) => Plugin.ClaimSegments(Home, appData, folder, force);
+
+        [Fact]
+        public void The_version_comes_from_the_manifest_name()
+        {
+            Assert.Equal("v0.35.0", Json.Str(Plugin.SegmentsOf(SealedMod("v0.35.0", "Super Beacon")), "version"));
+            var f = SealedMod("v1.2.3", "Hf");
+            File.WriteAllText(Path.Combine(f, "manifest.json"), "{\"Name\":\"Hf v1.2.3 (for HellForge)\"}");
+            Assert.Equal("v1.2.3", Json.Str(Plugin.SegmentsOf(f), "version"));
+            File.WriteAllText(Path.Combine(f, "manifest.json"), "{\"Name\":\"Hf\"}");
+            Assert.Equal("no_version", Json.Str(Plugin.SegmentsOf(f), "error"));
+            Assert.Null(Plugin.SegmentsOf(LicensedMod()));                     // a mod without segments
+        }
+
+        [Fact]
+        public void Segments_are_claimed_checked_and_written_where_the_shell_reads_them()
+        {
+            Account(A);
+            var mod = SealedMod();
+            Assert.Equal("not_signed_in", Json.Str(Claim(mod), "why"));
+            Assert.Equal(0, issuer.SegmentsCalls);
+            Assert.Equal("ok", SignIn(mod));
+            var r = Claim(mod);
+            Assert.True(Json.Bool(r, "claimed"));
+            Assert.Equal(A, Json.Str(r, "account"));
+            Assert.Equal(A, issuer.LastSegmentsAccount);
+            var dir = SegDir();
+            for (int i = 1; i <= 8; i++)
+                Assert.Equal(issuer.SegmentText("sealed-mod", "v1.2.0", A, i - 1), File.ReadAllText(Path.Combine(dir, "seg" + i + ".lua"), new UTF8Encoding(false)));
+            Assert.StartsWith("HD2 MOD SEGMENTS 1\nissuer=" + issuer.Name + "\nid=sealed-mod\nversion=v1.2.0\naccount=" + A + "\n", File.ReadAllText(Path.Combine(dir, "receipt.txt")));
+            Assert.Equal(new[] { "receipt.txt" }.Concat(Enumerable.Range(1, 8).Select(i => "seg" + i + ".lua")).OrderBy(x => x),
+                         Directory.GetFiles(dir).Select(Path.GetFileName).OrderBy(x => x));
+            Assert.DoesNotContain(Directory.GetDirectories(Path.GetDirectoryName(dir)), d => Path.GetFileName(d).StartsWith("."));   // no temporary folder left
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            int calls = issuer.SegmentsCalls;
+            Assert.Equal("held", Json.Str(Claim(mod), "why"));                  // held: not asked again
+            Assert.Equal(calls, issuer.SegmentsCalls);
+            Assert.True(Json.Bool(Claim(mod, force: true), "claimed"));         // forced: asked, and replaced whole
+            Assert.Equal(calls + 1, issuer.SegmentsCalls);
+            Assert.DoesNotContain(Directory.GetDirectories(Path.GetDirectoryName(dir)), d => Path.GetFileName(d).StartsWith("."));
+        }
+
+        [Fact]
+        public void A_receipt_that_does_not_check_out_writes_nothing()
+        {
+            Account(A);
+            var mod = SealedMod();
+            Assert.Equal("ok", SignIn(mod));
+            foreach (var spoil in new Action[]
+            {
+                () => issuer.SegmentsSignWith = "b",                       // not the declared key
+                () => issuer.SegmentsSpoil = "text",                       // the texts are not what it covers
+                () => issuer.SegmentsSpoil = "version",                    // for another version
+                () => issuer.SegmentsSpoil = "account",                    // for another account
+                () => issuer.SegmentsSpoil = "count",                      // too few segments
+            })
+            {
+                issuer.SegmentsSignWith = "a";
+                issuer.SegmentsSpoil = null;
+                spoil();
+                Assert.Equal("bad_receipt", Json.Str(Claim(mod), "error"));
+                Assert.False(Directory.Exists(SegDir()));
+            }
+        }
+
+        [Fact]
+        public void A_good_set_is_kept_when_a_new_claim_fails()
+        {
+            Account(A);
+            var mod = SealedMod();
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            var before = File.ReadAllText(Path.Combine(SegDir(), "seg1.lua"));
+            issuer.SegmentsSignWith = "b";
+            Assert.Equal("bad_receipt", Json.Str(Claim(mod, force: true), "error"));
+            Assert.Equal(before, File.ReadAllText(Path.Combine(SegDir(), "seg1.lua")));
+            Assert.Equal(A, Plugin.HeldAccount(appData, Decl(mod), Plugin.SegmentsOf(mod)));
+        }
+
+        [Fact]
+        public void A_segment_changed_on_disk_is_not_held_and_is_claimed_again()
+        {
+            Account(A);
+            var mod = SealedMod();
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            var seg3 = Path.Combine(SegDir(), "seg3.lua");
+            File.AppendAllText(seg3, "-- edited");
+            Assert.Null(Plugin.HeldAccount(appData, Decl(mod), Plugin.SegmentsOf(mod)));
+            Assert.Equal("missing", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            Assert.Equal(issuer.SegmentText("sealed-mod", "v1.2.0", A, 2), File.ReadAllText(seg3, new UTF8Encoding(false)));
+        }
+
+        [Fact]
+        public void A_version_the_author_has_not_uploaded_is_pending_and_said_so()
+        {
+            Account(A);
+            var mod = SealedMod("v9.9.9");
+            InLibrary("Sealed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.Uploaded.Remove("v9.9.9");
+            Assert.Equal("payload_pending", Json.Str(Claim(mod), "error"));
+            Assert.False(Directory.Exists(SegDir("v9.9.9")));
+            Assert.Equal("pending", Plugin.SegmentsState(Home, appData, mod));
+            Assert.Equal("Awaiting the author", Json.Str(Plugin.ModNote(mod, Host()), "text"));
+            issuer.Uploaded.Add("v9.9.9");
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            Assert.Null(Plugin.ModNote(mod, Host()));                           // licensed and held: nothing on the row
+        }
+
+        [Fact]
+        public void The_issuers_refusal_is_kept_and_the_next_account_tried()
+        {
+            Account(A, 1);
+            Account(B, 60);
+            var mod = SealedMod();
+            issuer.Accounts = new[] { A, B };
+            Assert.Equal("ok", SignIn(mod));
+            issuer.SegmentsRefuse = A;                                          // the issuer refuses A (unbound since)
+            var r = Claim(mod);
+            Assert.True(Json.Bool(r, "claimed"));
+            Assert.Equal(B, Json.Str(r, "account"));
+            issuer.SegmentsRefuse = null;
+            issuer.SegmentsError = "banned";
+            Assert.Equal("banned", Json.Str(Claim(mod, force: true), "error"));
+        }
+
+        [Fact]
+        public void Versions_no_library_mod_is_at_are_removed_and_nothing_else()
+        {
+            Account(A);
+            var mod = SealedMod("v1.2.0");
+            InLibrary("Sealed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            var root = Path.GetDirectoryName(SegDir());
+            foreach (var d in new[] { "v1.0.0", ".v1.2.0.new-0123abcd", "notes", "v1.0.0-beta" }) Directory.CreateDirectory(Path.Combine(root, d));
+            var otherId = SegDir("v0.1.0", "other-mod");                         // an id no library mod declares
+            Directory.CreateDirectory(otherId);
+            Assert.True(Plugin.ClaimAll(Host()));
+            Assert.True(Directory.Exists(SegDir("v1.2.0")));
+            Assert.False(Directory.Exists(Path.Combine(root, "v1.0.0")));
+            Assert.False(Directory.Exists(Path.Combine(root, ".v1.2.0.new-0123abcd")));
+            Assert.True(Directory.Exists(Path.Combine(root, "notes")));
+            Assert.True(Directory.Exists(Path.Combine(root, "v1.0.0-beta")));
+            Assert.True(Directory.Exists(otherId));
+            library.Clear();                                                     // a library read empty removes nothing
+            Plugin.ClaimAll(Host());
+            Assert.True(Directory.Exists(SegDir("v1.2.0")));
+        }
+
+        [Fact]
+        public void Claims_go_to_the_plugins_own_log_and_never_to_the_managers_reports()
+        {
+            Account(A);
+            var mod = SealedMod();
+            InLibrary("Sealed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.Uploaded.Remove("v1.2.0");
+            Plugin.ClaimAll(Host());
+            issuer.Uploaded.Add("v1.2.0");
+            Plugin.ClaimAll(Host());
+            Plugin.ClaimAll(Host());                                             // held: not logged again
+            Assert.Equal(Path.Combine(Home, "license", "payload.log"), Plugin.LogPath(Home));
+            var log = File.ReadAllLines(Plugin.LogPath(Home));
+            Assert.Equal(2, log.Length);
+            Assert.Contains("sealed-mod v1.2.0: pending", log[0]);
+            Assert.Contains("sealed-mod v1.2.0: claimed (account " + A + ")", log[1]);
+            Assert.False(Directory.Exists(Path.Combine(Home, "reports")));
+            Assert.Empty(Directory.GetFiles(Home, "*.log", SearchOption.TopDirectoryOnly));
+        }
+
+        [Fact]
+        public void The_start_and_the_command_claim_what_is_missing()
+        {
+            Account(A);
+            var mod = SealedMod();
+            InLibrary("Sealed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Plugin.Start(Host()));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Directory.Delete(SegDir(), true);
+            var o = new StringWriter();
+            Assert.Equal(0, Plugin.Run("license-segments", new string[0], o, Host()));
+            Assert.Contains("Sealed v1.2.0: member content ready", o.ToString());
+            Assert.True(Directory.Exists(SegDir()));
         }
 
         // -- an issuer on this computer --------------------------------------------------------
@@ -763,6 +969,28 @@ namespace Hd2Qd.License.Tests
             /// <summary>/attest: what it was asked, and the refusal it gives instead of an answer.</summary>
             public int AttestCalls;
             public string AttestError, LastAttestNonce, LastAttestSteam;
+            /// <summary>(1.6.0) /segments: the versions uploaded, the key it signs receipts with, a
+            /// spoilt receipt ("text", "version", "account", "count"), an account it refuses, and a
+            /// refusal for every claim.</summary>
+            public readonly HashSet<string> Uploaded = new HashSet<string> { "v1.2.0", "v9.9.9", "v0.35.0" };
+            public string SegmentsSignWith = "a", SegmentsSpoil, SegmentsRefuse, SegmentsError, LastSegmentsAccount;
+            public int SegmentsCalls;
+
+            /// <summary>The text of one segment for an account: what a combo picks, here made up.</summary>
+            public string SegmentText(string id, string version, string account, int seg) =>
+                "-- " + id + " " + version + " segment " + seg + " for " + account.Substring(0, 4) + " é" + NL + "local x = " + seg + NL;
+
+            string Receipt(string key, string id, string version, string account, string hash)
+            {
+                var text = "HD2 MOD SEGMENTS 1" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
+                           "segments_hash=" + hash + NL + "issued=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + NL;
+                var pkcs8 = Convert.FromBase64String(Json.Str(Json.Obj(t.keys, key), "pkcs8"));
+                using (var rsa = new RSACng(CngKey.Import(pkcs8, CngKeyBlobFormat.Pkcs8PrivateBlob)))
+                {
+                    var sig = rsa.SignData(Encoding.UTF8.GetBytes(text), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                    return text + "sig=" + string.Concat(sig.Select(b => b.ToString("x2"))) + NL;
+                }
+            }
             public readonly int Days = 30;
 
             public Issuer(LicensePlugin t)
@@ -875,6 +1103,23 @@ namespace Hd2Qd.License.Tests
                         });
                     }
                     return (200, new Dictionary<string, object> { ["attest"] = Attest(SignWith, LastAttestNonce, Json.Str(body, "account"), am.Holder, DateTimeOffset.UtcNow.ToUnixTimeSeconds()) });
+                }
+                if (path == "/segments")
+                {
+                    SegmentsCalls++;
+                    string id = Json.Str(body, "id"), version = Json.Str(body, "version"), acct = Json.Str(body, "account");
+                    LastSegmentsAccount = acct;
+                    if (SegmentsError != null) return (403, new Dictionary<string, object> { ["error"] = SegmentsError });
+                    if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
+                    if (!sm.Accounts.Contains(acct) || acct == SegmentsRefuse) return (403, new Dictionary<string, object> { ["error"] = "account" });
+                    if (!Uploaded.Contains(version)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
+                    var texts = Enumerable.Range(0, SegmentsSpoil == "count" ? 7 : 8).Select(i => SegmentText(id, version, acct, i)).ToList();
+                    string hash;
+                    using (var sha = SHA256.Create()) hash = string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(string.Concat(texts))).Select(b => b.ToString("x2")));
+                    if (SegmentsSpoil == "text") texts[3] += "-- added";
+                    var receipt = Receipt(SegmentsSignWith, id, SegmentsSpoil == "version" ? "v0.0.1" : version,
+                                          SegmentsSpoil == "account" ? (acct == A ? B : A) : acct, hash);
+                    return (200, new Dictionary<string, object> { ["segments"] = texts.Cast<object>().ToList(), ["receipt"] = receipt });
                 }
                 if (path == "/claim")
                 {

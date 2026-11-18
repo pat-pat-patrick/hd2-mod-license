@@ -72,7 +72,8 @@ namespace Hd2Qd.License
         {
             var st = StateOf(Home(host), AppData(host), modFolder);
             var state = Json.Str(st, "state");
-            if (state == null || state == "licensed") return null;
+            if (state == "licensed") return SegmentsNote(modFolder, host);
+            if (state == null) return null;
             string key = state == "expired" ? "row_license_expired" : state == "bad_declaration" ? "lic_bad_declaration"
                 : state == "test_issuer" ? "row_license_test" : "row_license";
             string tip = state == "test_issuer" ? "row_license_test_tip" : "row_license_tip";
@@ -81,6 +82,26 @@ namespace Hd2Qd.License
             {
                 ["text"] = Words.Get(lang, key),
                 ["tip"] = Words.Get(lang, tip),
+                ["colour"] = "Yellow",
+            };
+        }
+
+        /// <summary>(1.6.0) A licensed mod that ships its Lua as per-account segments: nothing
+        /// when this computer holds its version's set; else what is missing, and (once per version
+        /// per run) a claim in the background, so a new version in the library is fetched without
+        /// a restart.</summary>
+        static Dictionary<string, object> SegmentsNote(string modFolder, Dictionary<string, object> host)
+        {
+            string seg;
+            try { seg = SegmentsState(Home(host), AppData(host), modFolder); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return null; }
+            if (seg == null || seg == "claimed") return null;
+            if (seg == "missing") ClaimLater(host, modFolder, SegmentsOf(modFolder));
+            string lang = Words.Lang(host);
+            return new Dictionary<string, object>
+            {
+                ["text"] = Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending" : "row_segments"),
+                ["tip"] = Words.Get(lang, "row_segments_tip"),
                 ["colour"] = "Yellow",
             };
         }
@@ -97,6 +118,9 @@ namespace Hd2Qd.License
             foreach (var (decl, _, _) in Issuers(LibraryOf(host)))
                 try { any |= Json.Bool(Renew(Home(host), AppData(host), decl, false), "renewed"); }
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is System.Security.Cryptography.CryptographicException) { }
+            // (1.6.0) the segments of the library's versions, after the licenses are fresh
+            try { any |= ClaimAll(host); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is System.Security.Cryptography.CryptographicException) { }
             return any;
         }
 
@@ -107,6 +131,7 @@ namespace Hd2Qd.License
             new[] { "license-login", "sign in to a mod author's issuer (license-login ISSUER, its name or a mod that uses it): your browser opens the author's members' site, and the license goes where the mods read it" },
             new[] { "license-redeem", "activate with the code a mod author gave you (license-redeem ISSUER CODE, the issuer's name or a mod that uses it), instead of signing in through the browser" },
             new[] { "license-renew", "renew the licenses that are half way to their end (--force: every one now)" },
+            new[] { "license-segments", "download the member content of the library's mods that ship it per game account (the manager does this by itself at its start; --force: download again)" },
             new[] { "license-answer", "answer the question a licensed mod asked at its start (the manager does this by itself while it runs)" },
             new[] { "license-logout", "remove an issuer's license and sign-in from this computer (license-logout ISSUER)" },
         };
@@ -148,6 +173,7 @@ namespace Hd2Qd.License
                     if (error != null)
                         throw new InvalidOperationException(CommandError(error) + (Json.Long(r, "wait_days") > 0 ? " (" + Json.Long(r, "wait_days") + " more days before an account can be replaced)" : ""));
                     o.WriteLine("licensed until " + When(Json.Long(r, "expires")));
+                    ClaimAll(host);
                     return 0;
                 }
                 case "license-redeem":
@@ -163,6 +189,7 @@ namespace Hd2Qd.License
                     if (error != null)
                         throw new InvalidOperationException(CommandError(error) + (Json.Long(r, "wait_days") > 0 ? " (" + Json.Long(r, "wait_days") + " more days before an account can be replaced)" : ""));
                     o.WriteLine("licensed until " + When(Json.Long(r, "expires")));
+                    ClaimAll(host);
                     return 0;
                 }
                 case "license-renew":
@@ -178,6 +205,24 @@ namespace Hd2Qd.License
                             : "not due, or not signed in here"));
                     }
                     return 0;
+                case "license-segments":
+                {
+                    ClaimAll(host, args.Contains("--force"));
+                    bool none = true;
+                    foreach (var m in library)
+                    {
+                        var path = Json.Str(m, "path");
+                        if (path == null || !Directory.Exists(path)) continue;
+                        var seg = SegmentsOf(path);
+                        if (seg == null) continue;
+                        none = false;
+                        var st = SegmentsState(home, appData, path);
+                        o.WriteLine(Json.Str(m, "name") + " " + (Json.Str(seg, "version") ?? "") + ": " + SegmentsCommandWords(st));
+                    }
+                    if (none) o.WriteLine("no mod in the library ships member content per game account");
+                    o.WriteLine("log: " + LogPath(home));
+                    return 0;
+                }
                 case "license-answer":
                     foreach (var (decl, _, _) in Issuers(library))
                     {
@@ -197,6 +242,20 @@ namespace Hd2Qd.License
                     return 0;
                 }
                 default: return 2;
+            }
+        }
+
+        static string SegmentsCommandWords(string st)
+        {
+            switch (st)
+            {
+                case "claimed": return "member content ready";
+                case "missing": return "not downloaded yet";
+                case "pending": case "payload_pending": return "the author has not published this version's member content yet";
+                case "not_signed_in": return "sign in first (license-login)";
+                case "no_version": return "no vX.Y.Z in the mod's manifest.json Name";
+                case "bad_receipt": return "the content received is not signed by the key the mod declares";
+                default: return CommandError(st);
             }
         }
 

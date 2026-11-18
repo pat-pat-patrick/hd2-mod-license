@@ -47,6 +47,18 @@
   "row_license_test": "测试版",
   "row_license_test_tip": "此 MOD 是测试版，其授权声明使用测试签发方，无法登录。请使用创作者的正式版本。",
   "row_license_tip": "仅供创作者的会员使用：请在「插件」页登录（齿轮旁的拼图按钮）。",
+  "seg_claimed": "{0}：会员内容已就绪",
+  "seg_missing": "{0}：会员内容尚未下载",
+  "seg_pending": "{0}：创作者尚未发布此版本的会员内容，本程序下次启动时将再次获取。",
+  "seg_not_signed_in": "{0}：登录后即可下载会员内容",
+  "seg_no_version": "{0}：无法从该 MOD 的 manifest.json 读出版本号",
+  "seg_failed": "{0}：会员内容下载失败。{1}",
+  "seg_claim": "重新获取",
+  "lic_err_bad_receipt": "收到的内容与 MOD 声明的密钥不符。",
+  "lic_err_account": "此游戏账号未绑定到此电脑上登录的会员。",
+  "row_segments": "缺少会员内容",
+  "row_segments_pending": "等待创作者发布",
+  "row_segments_tip": "此版本的会员内容尚未下载，详见「插件」页。",
   "cancel": "取消",
   "failed": "失败：{0}"
 }

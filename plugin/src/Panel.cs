@@ -74,6 +74,7 @@ namespace Hd2Qd.License
                                 Json.Str(decl, "name") + " · " + issuer + " · " +
                                 (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")));
                 var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 0, 0) };
+                var about = new List<string>();
                 if (busy)
                 {
                     var cancel = new Button { Content = Words.Get(lang, "cancel"), Style = Style("Ghost"), MinHeight = 36 };
@@ -114,8 +115,31 @@ namespace Hd2Qd.License
                         buttons.Children.Add(signOut);
                     }
                 }
+                // (1.6.0) the member content of this author's mods that ship it per game account
+                bool segmentsMissing = false;
+                if (state == "licensed")
+                    foreach (var m in LibraryOf(host))
+                    {
+                        var path = Json.Str(m, "path");
+                        if (path == null || !System.IO.Directory.Exists(path) || Json.Str(Declaration(path), "issuer") != issuer) continue;
+                        var seg = SegmentsOf(path);
+                        if (seg == null) continue;
+                        string st;
+                        try { st = SegmentsState(home, appData, path); }
+                        catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { st = "other"; }
+                        var label = Json.Str(m, "name");
+                        segmentsMissing |= st != "claimed";
+                        about.Add(SegmentsWords(st, label, lang));
+                    }
+                if (segmentsMissing && !busy && signingIn == null)
+                {
+                    var again = new Button { Content = Words.Get(lang, "seg_claim"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
+                    again.Click += (s, e) => ClaimNow(host, false);
+                    buttons.Children.Add(again);
+                }
                 var block = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
                 block.Children.Add(line);
+                foreach (var words in about) block.Children.Add(Small(words, new Thickness(20, 4, 0, 0)));
                 block.Children.Add(buttons);
                 panel.Children.Add(block);
             }
@@ -181,7 +205,7 @@ namespace Hd2Qd.License
                 wait = null;
             }
             var error = Json.Str(r, "error");
-            if (error == null) Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue");
+            if (error == null) { Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue"); ClaimNow(host, false); }
             else if (error == "cancelled") Foot(host, Words.Get(lang, "lic_cancelled"), "Muted");
             else
             {
@@ -221,7 +245,7 @@ namespace Hd2Qd.License
             }
             finally { signingIn = null; }
             var error = Json.Str(r, "error");
-            if (error == null) Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue");
+            if (error == null) { Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue"); ClaimNow(host, false); }
             else
             {
                 var words = error == "no_account" || error == "test_issuer" ? Words.Get(lang, "lic_" + error) : ErrorWords(r, lang);
@@ -251,6 +275,39 @@ namespace Hd2Qd.License
             ok.Click += (s, e) => w.DialogResult = true;
             w.Loaded += (s, e) => { box.Focus(); box.SelectAll(); };
             return w.ShowDialog() == true ? box.Text : null;
+        }
+
+        /// <summary>(1.6.0) One mod's member content in words.</summary>
+        static string SegmentsWords(string st, string mod, string lang)
+        {
+            switch (st)
+            {
+                case "claimed": case "missing": case "pending": case "not_signed_in": case "no_version":
+                    return Words.F(lang, "seg_" + st, mod);
+                case "bad_receipt": case "account": case "not_member": case "banned": case "network":
+                    return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_" + st));
+                case "sign_in_again": case "unknown":
+                    return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_sign_in_again"));
+                default: return Words.F(lang, "seg_failed", mod, st);
+            }
+        }
+
+        /// <summary>Claims in the background (after a sign-in, or the card's button), then redraws.</summary>
+        static void ClaimNow(Dictionary<string, object> host, bool force) =>
+            Task.Run(() =>
+            {
+                try { ClaimAll(host, force); }
+                catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException) { }
+                RefreshFromWorker(host);
+            });
+
+        /// <summary>The manager's redraw, on its own thread when it has a window.</summary>
+        static void RefreshFromWorker(Dictionary<string, object> host)
+        {
+            var refresh = Get<Action>(host, "refresh");
+            if (refresh == null) return;
+            var d = Application.Current?.Dispatcher;
+            if (d != null) d.BeginInvoke(refresh); else refresh();
         }
 
         /// <summary>A failed sign-in in words: {error, detail?, wait_days?}.</summary>

@@ -47,6 +47,18 @@
   "row_license_test": "Test build",
   "row_license_test_tip": "This mod is a test build: its license names a test issuer, where nobody can sign in. Use the author's released version.",
   "row_license_tip": "For the author's members: sign in on the Plugins page (the jigsaw piece beside the gear).",
+  "seg_claimed": "{0}: member content ready",
+  "seg_missing": "{0}: member content not downloaded yet",
+  "seg_pending": "{0}: the author has not yet published the member content for this version. It will be requested again the next time this program starts.",
+  "seg_not_signed_in": "{0}: sign in to download the member content",
+  "seg_no_version": "{0}: the version cannot be read from the mod's manifest.json",
+  "seg_failed": "{0}: the member content could not be downloaded. {1}",
+  "seg_claim": "Request again",
+  "lic_err_bad_receipt": "The content received is not signed by the key the mod declares.",
+  "lic_err_account": "This game account is not bound to the membership signed in on this computer.",
+  "row_segments": "Member content missing",
+  "row_segments_pending": "Awaiting the author",
+  "row_segments_tip": "This version's member content has not been downloaded. See the Plugins page.",
   "cancel": "Cancel",
   "failed": "Failed: {0}"
 }
