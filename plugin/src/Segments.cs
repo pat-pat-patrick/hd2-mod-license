@@ -10,7 +10,7 @@ using System.Threading;
 namespace Hd2Qd.License
 {
     /// <summary>(1.6.0) Per-account segments (spec sections 4 to 6 of
-    /// CONTRACT_sealed_lua). A mod whose hd2_license.json has "segments": {id, count} ships only
+    /// CONTRACT_sealed_lua). A mod whose hd2_license.json has "segments": {id, count, version} ships only
     /// a shell; its Lua comes from the issuer, one variant per segment for each game account.
     /// This claims them (POST /segments with a member's renew token), checks the signed receipt
     /// against the key the mod declares and the texts it covers, and only then writes
@@ -27,6 +27,7 @@ namespace Hd2Qd.License
         const string SegmentsHeader = "HD2 MOD SEGMENTS 1\n";
         static readonly Regex PayloadId = new Regex("^[a-z0-9][a-z0-9._-]{0,63}$");
         static readonly Regex VersionTag = new Regex(@"(?<![\w.])v\d+(?:\.\d+)+(?![\w.])");
+        static readonly Regex WholeVersion = new Regex(@"^v\d+(?:\.\d+)+\z");   // \z: "$" would let a trailing newline through
         static readonly Regex OwnFolder = new Regex(@"^(?:v\d+(?:\.\d+)+|\.v\d+(?:\.\d+)+\.(?:new|old)-[0-9a-f]{8})$");
         /// <summary>One claim or clean at a time in this process (the start, a row, a command).</summary>
         static readonly object segmentsLock = new object();
@@ -48,6 +49,15 @@ namespace Hd2Qd.License
             var id = Json.Str(s, "id");
             long count = Json.Long(s, "count");
             if (id == null || !PayloadId.IsMatch(id) || count < 1 || count > 64) return Err("bad_declaration");
+            // the version the shell was built for: "segments".version when the mod declares it (a
+            // published package's Name carries no version), else the last vX.Y.Z in the Name. A
+            // declared version must be a whole tag: it names a folder on disk.
+            if (s.ContainsKey("version"))
+            {
+                var declared = Json.Str(s, "version");
+                if (declared == null || !WholeVersion.IsMatch(declared)) return Err("bad_declaration");
+                return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = declared };
+            }
             string name = null;
             try
             {
@@ -55,7 +65,6 @@ namespace Hd2Qd.License
                 if (File.Exists(m)) name = Json.Str(Json.Parse(File.ReadAllText(m)) as Dictionary<string, object>, "Name");
             }
             catch (Exception e) when (e is FormatException || e is IOException || e is UnauthorizedAccessException) { }
-            // the version the shell was built for: the last vX.Y.Z in the manifest's Name
             var tags = name == null ? null : VersionTag.Matches(name);
             if (tags == null || tags.Count == 0) return Err("no_version");
             return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = tags[tags.Count - 1].Value };

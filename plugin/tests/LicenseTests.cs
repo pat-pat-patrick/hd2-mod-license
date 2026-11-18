@@ -760,6 +760,51 @@ namespace Hd2Qd.License.Tests
             Assert.Null(Plugin.SegmentsOf(LicensedMod()));                     // a mod without segments
         }
 
+        /// <summary>Puts "version" (any JSON value, or the raw text given) into the mod's "segments".</summary>
+        static void DeclareVersion(string folder, object version)
+        {
+            var path = Path.Combine(folder, "hd2_license.json");
+            var d = (Dictionary<string, object>)Json.Parse(File.ReadAllText(path));
+            ((Dictionary<string, object>)d["segments"])["version"] = version;
+            File.WriteAllText(path, Json.Write(d));
+        }
+
+        [Fact]
+        public void A_declared_version_wins_over_the_manifest_name()
+        {
+            // a published package: the Name carries no version, the declaration does
+            var pub = SealedMod("", "Pub");
+            File.WriteAllText(Path.Combine(pub, "manifest.json"), "{\"Name\":\"Pub\"}");
+            Assert.Equal("no_version", Json.Str(Plugin.SegmentsOf(pub), "error"));
+            DeclareVersion(pub, "v0.35.0");
+            Assert.Equal("v0.35.0", Json.Str(Plugin.SegmentsOf(pub), "version"));
+            // the declaration wins over a version in the Name
+            var both = SealedMod("v9.9.9", "Both");
+            DeclareVersion(both, "v1.0.1");
+            Assert.Equal("v1.0.1", Json.Str(Plugin.SegmentsOf(both), "version"));
+            // a declared version names a folder: anything but a whole tag is refused, never a fallback to the Name
+            foreach (var bad in new object[] { "0.35.0", "v0", "v0.35.0\n", "v0.35.0/../x", "..", "", "v0.35.0 ", 35L, null })
+            {
+                DeclareVersion(both, bad);
+                var got = Plugin.SegmentsOf(both);
+                Assert.True(Json.Str(got, "error") == "bad_declaration", "declared " + Json.Write(bad) + " gave " + Json.Write(got));
+            }
+        }
+
+        [Fact]
+        public void A_published_package_claims_the_declared_version()
+        {
+            Account(A);
+            var mod = SealedMod("", "Pub");
+            File.WriteAllText(Path.Combine(mod, "manifest.json"), "{\"Name\":\"Pub\"}");
+            DeclareVersion(mod, "v1.2.0");
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            Assert.Equal("v1.2.0", issuer.LastSegmentsVersion);
+            Assert.StartsWith("HD2 MOD SEGMENTS 1\nissuer=" + issuer.Name + "\nid=sealed-mod\nversion=v1.2.0\n", File.ReadAllText(Path.Combine(SegDir("v1.2.0"), "receipt.txt")));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+        }
+
         [Fact]
         public void Segments_are_claimed_checked_and_written_where_the_shell_reads_them()
         {
@@ -973,7 +1018,7 @@ namespace Hd2Qd.License.Tests
             /// spoilt receipt ("text", "version", "account", "count"), an account it refuses, and a
             /// refusal for every claim.</summary>
             public readonly HashSet<string> Uploaded = new HashSet<string> { "v1.2.0", "v9.9.9", "v0.35.0" };
-            public string SegmentsSignWith = "a", SegmentsSpoil, SegmentsRefuse, SegmentsError, LastSegmentsAccount;
+            public string SegmentsSignWith = "a", SegmentsSpoil, SegmentsRefuse, SegmentsError, LastSegmentsAccount, LastSegmentsVersion;
             public int SegmentsCalls;
 
             /// <summary>The text of one segment for an account: what a combo picks, here made up.</summary>
@@ -1109,6 +1154,7 @@ namespace Hd2Qd.License.Tests
                     SegmentsCalls++;
                     string id = Json.Str(body, "id"), version = Json.Str(body, "version"), acct = Json.Str(body, "account");
                     LastSegmentsAccount = acct;
+                    LastSegmentsVersion = version;
                     if (SegmentsError != null) return (403, new Dictionary<string, object> { ["error"] = SegmentsError });
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
                     if (!sm.Accounts.Contains(acct) || acct == SegmentsRefuse) return (403, new Dictionary<string, object> { ["error"] = "account" });
