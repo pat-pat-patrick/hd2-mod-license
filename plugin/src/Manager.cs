@@ -217,7 +217,11 @@ namespace Hd2Qd.License
                         if (seg == null) continue;
                         none = false;
                         var st = SegmentsState(home, appData, path);
-                        o.WriteLine(Json.Str(m, "name") + " " + (Json.Str(seg, "version") ?? "") + ": " + SegmentsCommandWords(st));
+                        // the version comes from the Name, so the name nearly always holds it already
+                        var name = Json.Str(m, "name") ?? Path.GetFileName(path);
+                        var ver = Json.Str(seg, "version");
+                        if (ver != null && name.IndexOf(ver, StringComparison.Ordinal) < 0) name += " " + ver;
+                        o.WriteLine(name + ": " + SegmentsCommandWords(st));
                     }
                     if (none) o.WriteLine("no mod in the library ships member content per game account");
                     o.WriteLine("log: " + LogPath(home));
