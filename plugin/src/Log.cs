@@ -80,6 +80,26 @@ namespace Hd2Qd.License
             return what.Append(" (").Append(ms).Append(" ms)").ToString();
         }
 
+        /// <summary>Windows as the registry says it ("Windows 11 24H2 build 26100.4349"):
+        /// Environment.OSVersion says 6.2.9200 (Windows 8) to a .NET Framework program without a
+        /// manifest. ProductName says Windows 10 on 11 too, so the build tells them apart.</summary>
+        static string WindowsVersion()
+        {
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    var build = k?.GetValue("CurrentBuildNumber") as string ?? k?.GetValue("CurrentBuild") as string;
+                    if (build == null) return Environment.OSVersion.VersionString;
+                    var name = int.TryParse(build, out var b) && b >= 22000 ? "Windows 11" : "Windows 10";
+                    var display = k.GetValue("DisplayVersion") as string ?? k.GetValue("ReleaseId") as string;
+                    var ubr = k.GetValue("UBR") is int u ? "." + u : "";
+                    return name + (display != null ? " " + display : "") + " build " + build + ubr;
+                }
+            }
+            catch (Exception e) when (e is System.Security.SecurityException || e is UnauthorizedAccessException || e is IOException) { return Environment.OSVersion.VersionString; }
+        }
+
         static string Inner(Exception e)
         {
             while (e.InnerException != null) e = e.InnerException;
@@ -130,7 +150,7 @@ namespace Hd2Qd.License
             head.Append("issuer=").Append(issuer).Append('\n');
             head.Append("plugin=").Append(PluginVersion).Append('\n');
             if (manager != null) head.Append("manager=").Append(manager).Append('\n');
-            head.Append("windows=").Append(Environment.OSVersion.VersionString).Append('\n');
+            head.Append("windows=").Append(WindowsVersion()).Append('\n');
             head.Append("sent=").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz")).Append('\n');
             head.Append("state=").Append(lastState.TryGetValue(home + "|" + issuer, out var now) ? now : Json.Str(st, "state")).Append('\n');
             head.Append("---\n");

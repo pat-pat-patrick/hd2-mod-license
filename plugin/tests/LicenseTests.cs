@@ -1216,6 +1216,7 @@ namespace Hd2Qd.License.Tests
             var sent = issuer.LastDiagLog;
             Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.8.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
+            Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
             Assert.DoesNotContain("other.example", sent);
             Assert.DoesNotContain(issuer.RenewToken, sent);
