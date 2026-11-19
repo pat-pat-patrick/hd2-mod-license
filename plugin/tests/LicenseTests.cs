@@ -1171,6 +1171,20 @@ namespace Hd2Qd.License.Tests
             Assert.Empty(Directory.GetFiles(Home, "*.log", SearchOption.TopDirectoryOnly));
         }
 
+        /// <summary>The card warns on a manager that ends with its window (before 0.22.0, which
+        /// first says its version to plugins): a sealed mod is unlocked only while it runs.</summary>
+        [Fact]
+        public void A_manager_without_the_notification_area_is_told_apart()
+        {
+            Dictionary<string, object> H(string v) { var h = Host(); if (v != null) h["version"] = v; return h; }
+            Assert.False(Plugin.RunsOnInTray(H(null)), "0.21.0 and older say no version");
+            Assert.False(Plugin.RunsOnInTray(H("0.21.0")));
+            Assert.False(Plugin.RunsOnInTray(H("nonsense")));
+            Assert.True(Plugin.RunsOnInTray(H("0.22.0")));
+            Assert.True(Plugin.RunsOnInTray(H("0.23.4")));
+            Assert.True(Plugin.RunsOnInTray(H("1.0.0")));
+        }
+
         [Fact]
         public void The_start_and_the_command_claim_what_is_missing()
         {

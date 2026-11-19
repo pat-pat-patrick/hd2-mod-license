@@ -53,6 +53,8 @@
   "seg_not_signed_in": "{0}：登录后即可下载会员内容",
   "seg_no_version": "{0}：无法从该 MOD 的 manifest.json 读出版本号",
   "seg_failed": "{0}：会员内容下载失败。{1}",
+  "seg_needs_tray": "会员内容只在游戏启动时、本程序正在运行的情况下解锁。当前版本的 HD2 Mod Quick Deploy 关闭窗口即退出，请更新到 0.22.0 或更新版本：它关闭窗口后会在通知区域继续运行。",
+  "seg_unsealed": "{0}：此版本的会员内容已停止发放，请把该 MOD 更新到最新版本。",
   "seg_claim": "重新获取",
   "lic_err_bad_receipt": "收到的内容与 MOD 声明的密钥不符。",
   "lic_err_account": "此游戏账号未绑定到此电脑上登录的会员。",

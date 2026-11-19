@@ -116,7 +116,7 @@ namespace Hd2Qd.License
                     }
                 }
                 // (1.6.0) the member content of this author's mods that ship it per game account
-                bool segmentsMissing = false;
+                bool segmentsMissing = false, anySealed = false;
                 if (state == "licensed")
                     foreach (var m in LibraryOf(host))
                     {
@@ -129,8 +129,13 @@ namespace Hd2Qd.License
                         catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { st = "other"; }
                         var label = Json.Str(m, "name");
                         segmentsMissing |= st != "claimed";
+                        anySealed |= Json.Bool(seg, "sealed");
                         about.Add(SegmentsWords(st, label, lang));
                     }
+                // a sealed (C1) mod is unlocked only while this program runs when the game starts:
+                // a manager older than 0.22.0 ends when its window closes, and then the mod does
+                // nothing in that game with no word why (2026-11-19)
+                if (anySealed && !RunsOnInTray(host)) about.Add(Words.Get(lang, "seg_needs_tray"));
                 if (segmentsMissing && !busy && signingIn == null)
                 {
                     var again = new Button { Content = Words.Get(lang, "seg_claim"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
@@ -144,6 +149,18 @@ namespace Hd2Qd.License
                 panel.Children.Add(block);
             }
             return panel;
+        }
+
+        /// <summary>Whether the manager hosting this plugin keeps running in the notification area
+        /// when its window closes: HD2 Mod Quick Deploy 0.22.0 and later, the first to say its
+        /// version to plugins (host "version").</summary>
+        public static bool RunsOnInTray(Dictionary<string, object> host)
+        {
+            var v = host != null && host.TryGetValue("version", out var o) ? o as string : null;
+            var m = v == null ? null : System.Text.RegularExpressions.Regex.Match(v, @"^(\d+)\.(\d+)");
+            if (m == null || !m.Success) return false;
+            int major = int.Parse(m.Groups[1].Value), minor = int.Parse(m.Groups[2].Value);
+            return major > 0 || minor >= 22;
         }
 
         static bool Ask(Dictionary<string, object> host, string text, string action) =>
@@ -286,6 +303,8 @@ namespace Hd2Qd.License
                     return Words.F(lang, "seg_" + st, mod);
                 case "bad_receipt": case "account": case "not_member": case "banned": case "network":
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_" + st));
+                case "unsealed":
+                    return Words.F(lang, "seg_unsealed", mod);
                 case "sign_in_again": case "unknown":
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_sign_in_again"));
                 default: return Words.F(lang, "seg_failed", mod, st);
