@@ -732,17 +732,154 @@ namespace Hd2Qd.License.Tests
 
         /// <summary>A licensed mod that ships its Lua as segments: hd2_license.json with
         /// "segments", and the version in manifest.json's Name.</summary>
-        string SealedMod(string version = "v1.2.0", string name = "Sealed", string id = "sealed-mod", int count = 8)
+        string SealedMod(string version = "v1.2.0", string name = "Sealed", string id = "sealed-mod", int count = 8, bool c1 = false)
         {
             var folder = Path.Combine(Root, "library", name);
             Directory.CreateDirectory(folder);
+            var seg = new Dictionary<string, object> { ["id"] = id, ["count"] = (long)count };
+            if (c1) seg["sealed"] = 1L;
             File.WriteAllText(Path.Combine(folder, "hd2_license.json"), Json.Write(new Dictionary<string, object>
             {
                 ["protocol"] = 1L, ["issuer"] = issuer.Name, ["name"] = "Test Author", ["key"] = KeyN("a"),
-                ["segments"] = new Dictionary<string, object> { ["id"] = id, ["count"] = (long)count }, ["integrity"] = 1L,
+                ["segments"] = seg, ["integrity"] = 1L,
             }));
             File.WriteAllText(Path.Combine(folder, "manifest.json"), "{\"Version\":1,\"Name\":\"" + name + " " + version + "\"}");
+            if (c1) issuer.Seal(version);
             return folder;
+        }
+
+        // -- (1.7.0) C1 session credential: sealed segments live as ciphertext ------------------
+
+        /// <summary>A C1 mod in the host library, signed in, its ciphertext claimed and resident.</summary>
+        string ClaimedC1(out string mod, string version = "v1.2.0")
+        {
+            Account(A);
+            mod = SealedMod(version, "C1", c1: true);
+            InLibrary("C1", mod);
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Json.Bool(Claim(mod), "claimed"));
+            return SegDir(version);
+        }
+
+        [Fact]
+        public void A_sealed_version_is_claimed_as_ciphertext_and_no_plaintext_is_written()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(issuer.LastSegmentsEnc, "the plugin asks for ciphertext (enc=1)");
+            // resident: seg*.enc and a SEGMENTS 2 receipt; no seg*.lua until the game runs
+            for (int i = 1; i <= 8; i++) Assert.True(File.Exists(Path.Combine(dir, "seg" + i + ".enc")));
+            Assert.False(File.Exists(Path.Combine(dir, "seg1.lua")), "no plaintext is written at claim time");
+            Assert.StartsWith("HD2 MOD SEGMENTS 2\nissuer=" + issuer.Name + "\n", File.ReadAllText(Path.Combine(dir, "receipt.txt")));
+            // held offline, without the content key: the card says claimed
+            Assert.Equal(A, Plugin.HeldAccount(appData, Decl(mod), Plugin.SegmentsOf(mod)));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+        }
+
+        [Fact]
+        public void A_game_session_decrypts_the_plaintext_and_the_exit_removes_it()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()), "the game start decrypts the ciphertext");
+            for (int i = 1; i <= 8; i++)
+            {
+                var lua = Path.Combine(dir, "seg" + i + ".lua");
+                Assert.True(File.Exists(lua));
+                // the plaintext the shell reads is the account's segment text -- the watermark survives (trace still hits)
+                Assert.Equal(issuer.SegmentText("sealed-mod", "v1.2.0", A, i - 1), File.ReadAllText(lua, new UTF8Encoding(false)));
+            }
+            Assert.True(File.Exists(Path.Combine(dir, "key.dpapi")), "the content key is cached machine-bound for the grace");
+            // the exit removes only the plaintext; ciphertext, receipt and key cache stay
+            Plugin.OnGameStop(Host());
+            for (int i = 1; i <= 8; i++) Assert.False(File.Exists(Path.Combine(dir, "seg" + i + ".lua")));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.enc")) && File.Exists(Path.Combine(dir, "receipt.txt")) && File.Exists(Path.Combine(dir, "key.dpapi")));
+        }
+
+        [Fact]
+        public void Offline_within_the_grace_still_decrypts_from_the_cached_key()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()));               // a first session online, so the key is cached
+            Plugin.OnGameStop(Host());
+            long sessions = issuer.SessionCalls;
+            issuer.SessionError = "network_stub";                  // the issuer now refuses/offline; the cache must carry it
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 5 * 86400);   // 5 days later, within the 20-day grace
+            Assert.True(Plugin.OnGameStart(Host()), "within the grace the cached key still decrypts");
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        [Fact]
+        public void Past_the_grace_offline_the_segments_stay_sealed()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()));
+            Plugin.OnGameStop(Host());
+            issuer.SessionError = "network_stub";
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 40 * 86400);  // past the 20-day grace
+            Assert.False(Plugin.OnGameStart(Host()), "past the grace, offline, nothing decrypts");
+            Assert.False(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        [Fact]
+        public void A_cache_from_another_computer_does_not_open()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()));
+            Plugin.OnGameStop(Host());
+            // a copied key.dpapi from another machine/user fails DPAPI unprotect -> no key
+            File.WriteAllBytes(Path.Combine(dir, "key.dpapi"), new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            issuer.SessionError = "network_stub";
+            Assert.False(Plugin.OnGameStart(Host()), "a cache from another computer cannot be opened");
+            Assert.False(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        [Fact]
+        public void A_wrong_key_or_spoilt_sealed_receipt_decrypts_nothing()
+        {
+            // the sealed_hash in the receipt must cover the blobs, or the claim is not written
+            Account(A);
+            var mod = SealedMod("v1.2.0", "C1", c1: true);
+            InLibrary("C1", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.SegmentsSpoil = "sealed";                       // a wrong sealed_hash in the receipt
+            Assert.Equal("bad_receipt", Json.Str(Claim(mod), "error"));
+            Assert.False(Directory.Exists(SegDir()));
+            issuer.SegmentsSpoil = "text";                         // a resident blob not covered by sealed_hash
+            Assert.Equal("bad_receipt", Json.Str(Claim(mod), "error"));
+        }
+
+        [Fact]
+        public void A_wrong_session_key_decrypts_nothing()
+        {
+            // defence in depth: even with the ciphertext resident, a key that is not K_v (a stale or
+            // tampered cache) decrypts to plaintext that does not match the receipt's segments_hash,
+            // so no seg*.lua is written -- the session fails closed
+            var dir = ClaimedC1(out var mod);
+            // a well-formed DPAPI cache that holds a wrong 32-byte key for this account
+            var wrong = new byte[32];
+            using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(wrong);
+            var record = Json.Write(new Dictionary<string, object>
+            { ["k"] = Convert.ToBase64String(wrong), ["account"] = A, ["exp"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 86400 });
+            var prot = ProtectedData.Protect(Encoding.UTF8.GetBytes(record), Encoding.ASCII.GetBytes("hd2qd-license-session-1"), DataProtectionScope.CurrentUser);
+            File.WriteAllBytes(Path.Combine(dir, "key.dpapi"), prot);
+            issuer.SessionError = "network_stub";                  // offline, so the wrong cached key is used
+            Assert.False(Plugin.OnGameStart(Host()));
+            Assert.False(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        [Fact]
+        public void A_non_c1_version_is_still_claimed_as_plaintext_beside_a_c1_one()
+        {
+            // migration: a sealed (C1) mod and an old plaintext mod coexist; the old one keeps its
+            // plaintext path (seg*.lua resident, SEGMENTS 1 receipt), C1 keeps ciphertext
+            Account(A);
+            var c1 = SealedMod("v1.2.0", "C1", c1: true);
+            var plain = SealedMod("v0.35.0", "Plain");           // not c1
+            Assert.Equal("ok", SignIn(c1));
+            Assert.True(Json.Bool(Claim(c1), "claimed"));
+            Assert.True(Json.Bool(Claim(plain), "claimed"));
+            Assert.True(File.Exists(Path.Combine(SegDir("v1.2.0"), "seg1.enc")) && !File.Exists(Path.Combine(SegDir("v1.2.0"), "seg1.lua")));
+            Assert.True(File.Exists(Path.Combine(SegDir("v0.35.0"), "seg1.lua")));
+            Assert.StartsWith("HD2 MOD SEGMENTS 1\n", File.ReadAllText(Path.Combine(SegDir("v0.35.0"), "receipt.txt")));
         }
 
         string SegDir(string version = "v1.2.0", string id = "sealed-mod") => Plugin.SegmentsFolder(appData, issuer.Name, id, version);
@@ -1020,6 +1157,21 @@ namespace Hd2Qd.License.Tests
             public readonly HashSet<string> Uploaded = new HashSet<string> { "v1.2.0", "v9.9.9", "v0.35.0" };
             public string SegmentsSignWith = "a", SegmentsSpoil, SegmentsRefuse, SegmentsError, LastSegmentsAccount, LastSegmentsVersion;
             public int SegmentsCalls;
+            public bool LastSegmentsEnc;
+            /// <summary>(1.7.0, C1) sealed versions: their content key K_v (made by Seal), the grace
+            /// /session hands out, and what /session answers instead (a refusal, or an account it refuses).</summary>
+            public readonly Dictionary<string, byte[]> Keys = new Dictionary<string, byte[]>();
+            public long Grace = 20 * 86400;
+            public int SessionCalls;
+            public string SessionError;
+
+            /// <summary>Marks a version sealed (C1): it gets a content key, and /segments serves it as
+            /// ciphertext when the plugin asks with enc.</summary>
+            public void Seal(string version)
+            {
+                Uploaded.Add(version);
+                if (!Keys.ContainsKey(version)) { var k = new byte[32]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(k); Keys[version] = k; }
+            }
 
             /// <summary>The text of one segment for an account: what a combo picks, here made up.</summary>
             public string SegmentText(string id, string version, string account, int seg) =>
@@ -1029,11 +1181,39 @@ namespace Hd2Qd.License.Tests
             {
                 var text = "HD2 MOD SEGMENTS 1" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
                            "segments_hash=" + hash + NL + "issued=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + NL;
+                return Sign(key, text);
+            }
+
+            /// <summary>(1.7.0, C1) a SEGMENTS 2 receipt: the plaintext hash and the ciphertext hash.</summary>
+            string Receipt2(string key, string id, string version, string account, string plainHash, string sealedHash)
+            {
+                var text = "HD2 MOD SEGMENTS 2" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
+                           "alg=A256CBC" + NL + "segments_hash=" + plainHash + NL + "sealed_hash=" + sealedHash + NL + "issued=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + NL;
+                return Sign(key, text);
+            }
+
+            string Sign(string key, string text)
+            {
                 var pkcs8 = Convert.FromBase64String(Json.Str(Json.Obj(t.keys, key), "pkcs8"));
                 using (var rsa = new RSACng(CngKey.Import(pkcs8, CngKeyBlobFormat.Pkcs8PrivateBlob)))
                 {
                     var sig = rsa.SignData(Encoding.UTF8.GetBytes(text), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                     return text + "sig=" + string.Concat(sig.Select(b => b.ToString("x2"))) + NL;
+                }
+            }
+
+            /// <summary>AES-256-CBC/PKCS7, blob = IV(16) ‖ ciphertext, base64 -- the shape the plugin decrypts.</summary>
+            static string Encrypt(byte[] key, string plaintext)
+            {
+                using (var aes = Aes.Create())
+                {
+                    aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7; aes.Key = key; aes.GenerateIV();
+                    using (var enc = aes.CreateEncryptor())
+                    {
+                        var pt = Encoding.UTF8.GetBytes(plaintext);
+                        var ct = enc.TransformFinalBlock(pt, 0, pt.Length);
+                        return Convert.ToBase64String(aes.IV.Concat(ct).ToArray());
+                    }
                 }
             }
             public readonly int Days = 30;
@@ -1159,13 +1339,38 @@ namespace Hd2Qd.License.Tests
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
                     if (!sm.Accounts.Contains(acct) || acct == SegmentsRefuse) return (403, new Dictionary<string, object> { ["error"] = "account" });
                     if (!Uploaded.Contains(version)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
+                    bool enc = Json.Long(body, "enc") == 1;
+                    LastSegmentsEnc = enc;
                     var texts = Enumerable.Range(0, SegmentsSpoil == "count" ? 7 : 8).Select(i => SegmentText(id, version, acct, i)).ToList();
-                    string hash;
-                    using (var sha = SHA256.Create()) hash = string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(string.Concat(texts))).Select(b => b.ToString("x2")));
+                    string plainHash;
+                    using (var sha = SHA256.Create()) plainHash = string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(string.Concat(texts))).Select(b => b.ToString("x2")));
+                    string ver = SegmentsSpoil == "version" ? "v0.0.1" : version, ra = SegmentsSpoil == "account" ? (acct == A ? B : A) : acct;
+                    if (Keys.ContainsKey(version))
+                    {
+                        // C1 (section 12.4/12.5): a sealed version without enc tells an old plugin to update
+                        if (!enc) return (409, new Dictionary<string, object> { ["error"] = "update_plugin" });
+                        var blobs = texts.Select(x => Encrypt(Keys[version], x)).ToList();
+                        string sealedHash;
+                        using (var sha = SHA256.Create()) sealedHash = string.Concat(sha.ComputeHash(Encoding.UTF8.GetBytes(string.Concat(blobs))).Select(b => b.ToString("x2")));
+                        // "text": a resident blob not covered by the signed sealed_hash; "sealed": a wrong sealed_hash
+                        if (SegmentsSpoil == "text") blobs[3] = Encrypt(Keys[version], texts[3] + "-- added");
+                        if (SegmentsSpoil == "sealed") sealedHash = new string('e', 64);
+                        var rec2 = Receipt2(SegmentsSignWith, id, ver, ra, plainHash, sealedHash);
+                        return (200, new Dictionary<string, object> { ["segments"] = blobs.Cast<object>().ToList(), ["receipt"] = rec2, ["enc"] = 1 });
+                    }
                     if (SegmentsSpoil == "text") texts[3] += "-- added";
-                    var receipt = Receipt(SegmentsSignWith, id, SegmentsSpoil == "version" ? "v0.0.1" : version,
-                                          SegmentsSpoil == "account" ? (acct == A ? B : A) : acct, hash);
+                    var receipt = Receipt(SegmentsSignWith, id, ver, ra, plainHash);
                     return (200, new Dictionary<string, object> { ["segments"] = texts.Cast<object>().ToList(), ["receipt"] = receipt });
+                }
+                if (path == "/session")
+                {
+                    SessionCalls++;
+                    string id = Json.Str(body, "id"), version = Json.Str(body, "version"), acct = Json.Str(body, "account");
+                    if (SessionError != null) return (403, new Dictionary<string, object> { ["error"] = SessionError });
+                    if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
+                    if (!sm.Accounts.Contains(acct)) return (403, new Dictionary<string, object> { ["error"] = "account" });
+                    if (!Keys.ContainsKey(version)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
+                    return (200, new Dictionary<string, object> { ["key"] = Convert.ToBase64String(Keys[version]), ["grace"] = Grace });
                 }
                 if (path == "/claim")
                 {

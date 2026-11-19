@@ -25,6 +25,7 @@ namespace Hd2Qd.License
     public static partial class Plugin
     {
         const string SegmentsHeader = "HD2 MOD SEGMENTS 1\n";
+        const string SegmentsHeader2 = "HD2 MOD SEGMENTS 2\n";   // (1.7.0, C1) a sealed version's receipt
         static readonly Regex PayloadId = new Regex("^[a-z0-9][a-z0-9._-]{0,63}$");
         static readonly Regex VersionTag = new Regex(@"(?<![\w.])v\d+(?:\.\d+)+(?![\w.])");
         static readonly Regex WholeVersion = new Regex(@"^v\d+(?:\.\d+)+\z");   // \z: "$" would let a trailing newline through
@@ -49,6 +50,9 @@ namespace Hd2Qd.License
             var id = Json.Str(s, "id");
             long count = Json.Long(s, "count");
             if (id == null || !PayloadId.IsMatch(id) || count < 1 || count > 64) return Err("bad_declaration");
+            // (1.7.0, C1, CONTRACT section 12.2) "sealed": 1 -> the segments live as ciphertext and
+            // are decrypted per game session (Session.cs). No "sealed" -> the plaintext path (1.6.0).
+            bool sealedV = Json.Long(s, "sealed") == 1;
             // the version the shell was built for: "segments".version when the mod declares it (a
             // published package's Name carries no version), else the last vX.Y.Z in the Name. A
             // declared version must be a whole tag: it names a folder on disk.
@@ -56,7 +60,7 @@ namespace Hd2Qd.License
             {
                 var declared = Json.Str(s, "version");
                 if (declared == null || !WholeVersion.IsMatch(declared)) return Err("bad_declaration");
-                return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = declared };
+                return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = declared, ["sealed"] = sealedV };
             }
             string name = null;
             try
@@ -67,7 +71,7 @@ namespace Hd2Qd.License
             catch (Exception e) when (e is FormatException || e is IOException || e is UnauthorizedAccessException) { }
             var tags = name == null ? null : VersionTag.Matches(name);
             if (tags == null || tags.Count == 0) return Err("no_version");
-            return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = tags[tags.Count - 1].Value };
+            return new Dictionary<string, object> { ["id"] = id, ["count"] = count, ["version"] = tags[tags.Count - 1].Value, ["sealed"] = sealedV };
         }
 
         static string SegmentsRoot(string appData, string issuer, string id) =>
@@ -83,7 +87,7 @@ namespace Hd2Qd.License
         {
             text = text.Replace("\r", "");
             int at = text.IndexOf("\nsig=", StringComparison.Ordinal);
-            if (!text.StartsWith(SegmentsHeader, StringComparison.Ordinal) || at < 0) return null;
+            if ((!text.StartsWith(SegmentsHeader, StringComparison.Ordinal) && !text.StartsWith(SegmentsHeader2, StringComparison.Ordinal)) || at < 0) return null;
             string signed = text.Substring(0, at + 1), sig = text.Substring(at + 5).Trim();
             var f = Fields(signed);
             if (!f.TryGetValue("issuer", out var iss) || iss != issuer) return null;
@@ -110,15 +114,20 @@ namespace Hd2Qd.License
             string issuer = Json.Str(decl, "issuer"), id = Json.Str(seg, "id"), version = Json.Str(seg, "version"), key = Json.Str(decl, "key");
             var dir = SegmentsFolder(appData, issuer, id, version);
             long count = Json.Long(seg, "count");
+            // (1.7.0, C1) a sealed version keeps the ciphertext (seg<i>.enc) resident; the receipt's
+            // sealed_hash covers it, so a held set can be checked offline, without the content key.
+            // The plaintext seg<i>.lua appears only while the game runs (Session.cs).
+            bool sealedV = Json.Bool(seg, "sealed");
+            string ext = sealedV ? "enc" : "lua", hashField = sealedV ? "sealed_hash" : "segments_hash";
             try
             {
                 var receipt = Path.Combine(dir, "receipt.txt");
                 if (!File.Exists(receipt)) return null;
                 // the rows ask on every redraw: the files are read again only when one changed
-                var stamp = new StringBuilder(key).Append('|').Append(File.GetLastWriteTimeUtc(receipt).Ticks);
+                var stamp = new StringBuilder(key).Append('|').Append(ext).Append('|').Append(File.GetLastWriteTimeUtc(receipt).Ticks);
                 for (long i = 1; i <= count; i++)
                 {
-                    var fi = new FileInfo(Path.Combine(dir, "seg" + i + ".lua"));
+                    var fi = new FileInfo(Path.Combine(dir, "seg" + i + "." + ext));
                     if (!fi.Exists) return null;
                     stamp.Append('|').Append(fi.LastWriteTimeUtc.Ticks).Append(':').Append(fi.Length);
                 }
@@ -129,14 +138,14 @@ namespace Hd2Qd.License
                 if (f != null && f.TryGetValue("id", out var rid) && rid == id && f.TryGetValue("version", out var rv) && rv == version)
                     using (var sha = SHA256.Create())
                     {
-                        // the bytes on disk, as the issuer hashed the UTF-8 of the texts joined
+                        // the bytes on disk, as the issuer hashed the UTF-8 of the texts (or blobs) joined
                         for (long i = 1; i <= count; i++)
                         {
-                            var b = File.ReadAllBytes(Path.Combine(dir, "seg" + i + ".lua"));
+                            var b = File.ReadAllBytes(Path.Combine(dir, "seg" + i + "." + ext));
                             sha.TransformBlock(b, 0, b.Length, null, 0);
                         }
                         sha.TransformFinalBlock(new byte[0], 0, 0);
-                        if (f.TryGetValue("segments_hash", out var h) && h == Hex(sha.Hash) && f.TryGetValue("account", out var a)) account = a;
+                        if (f.TryGetValue(hashField, out var h) && h == Hex(sha.Hash) && f.TryGetValue("account", out var a)) account = a;
                     }
                 lock (heldCache) heldCache[dir] = (stamp.ToString(), account);
                 return account;
@@ -199,6 +208,10 @@ namespace Hd2Qd.License
             if (Json.Str(seg, "error") != null) return seg;
             string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key"), id = Json.Str(seg, "id"), version = Json.Str(seg, "version");
             int count = (int)Json.Long(seg, "count");
+            // (1.7.0, C1) a sealed version is claimed as ciphertext (enc=1): the resident files are
+            // seg<i>.enc and the receipt is a SEGMENTS 2 receipt whose sealed_hash covers them.
+            bool sealedV = Json.Bool(seg, "sealed");
+            string ext = sealedV ? "enc" : "lua", hashField = sealedV ? "sealed_hash" : "segments_hash";
             var bound = BoundAccounts(home, appData, decl);
             if (bound.Count == 0) return new Dictionary<string, object> { ["claimed"] = false, ["why"] = "not_signed_in" };
             var held = HeldAccount(appData, decl, seg);
@@ -209,10 +222,9 @@ namespace Hd2Qd.License
             foreach (var (account, tokens) in bound)
                 foreach (var token in tokens)
                 {
-                    var (status, body) = Post(issuer, "/segments", new Dictionary<string, object>
-                    {
-                        ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token,
-                    });
+                    var req = new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token };
+                    if (sealedV) req["enc"] = 1;
+                    var (status, body) = Post(issuer, "/segments", req);
                     if (status == 409) return Err(Json.Str(body, "error") ?? "payload_pending");
                     if (status == 403) { error = error ?? Json.Str(body, "error") ?? "unknown"; continue; }
                     if (status != 200) return Err("network");
@@ -223,9 +235,9 @@ namespace Hd2Qd.License
                         || !f.TryGetValue("id", out var rid) || rid != id
                         || !f.TryGetValue("version", out var rv) || rv != version
                         || !f.TryGetValue("account", out var ra) || ra != account
-                        || !f.TryGetValue("segments_hash", out var rh) || rh != Utf8Sha256(string.Concat(texts)))
+                        || !f.TryGetValue(hashField, out var rh) || rh != Utf8Sha256(string.Concat(texts)))
                     { error = error ?? "bad_receipt"; continue; }
-                    WriteSegments(appData, issuer, id, version, texts, receipt);
+                    WriteSegments(appData, issuer, id, version, texts, receipt, ext);
                     return new Dictionary<string, object> { ["claimed"] = true, ["account"] = account };
                 }
             return Err(error ?? "unknown");
@@ -233,7 +245,7 @@ namespace Hd2Qd.License
 
         /// <summary>The set, written whole into a new folder beside the version's, then moved into
         /// place; an older set for the version goes after.</summary>
-        static void WriteSegments(string appData, string issuer, string id, string version, List<string> texts, string receipt)
+        static void WriteSegments(string appData, string issuer, string id, string version, List<string> texts, string receipt, string ext = "lua")
         {
             var dir = SegmentsFolder(appData, issuer, id, version);
             var root = Path.GetDirectoryName(dir);
@@ -241,7 +253,7 @@ namespace Hd2Qd.License
             var tmp = Path.Combine(root, "." + version + ".new-" + Hex(Random(4)));
             Directory.CreateDirectory(tmp);
             var utf8 = new UTF8Encoding(false);
-            for (int i = 0; i < texts.Count; i++) File.WriteAllText(Path.Combine(tmp, "seg" + (i + 1) + ".lua"), texts[i], utf8);
+            for (int i = 0; i < texts.Count; i++) File.WriteAllText(Path.Combine(tmp, "seg" + (i + 1) + "." + ext), texts[i], utf8);
             File.WriteAllText(Path.Combine(tmp, "receipt.txt"), receipt.Replace("\r", ""), utf8);
             string old = null;
             if (Directory.Exists(dir))

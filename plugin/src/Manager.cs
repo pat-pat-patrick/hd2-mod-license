@@ -114,6 +114,10 @@ namespace Hd2Qd.License
             // (1.5.0) the mods' questions answered from now on (Attest.cs)
             try { Watch(host); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
+            // (1.7.0, C1) from now on a sealed version is decrypted for the game while it runs and
+            // its plaintext cleared when it stops (Session.cs)
+            try { WatchGame(host); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
             bool any = false;
             foreach (var (decl, _, _) in Issuers(LibraryOf(host)))
                 try { any |= Json.Bool(Renew(Home(host), AppData(host), decl, false), "renewed"); }
