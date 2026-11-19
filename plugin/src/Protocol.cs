@@ -65,7 +65,27 @@ namespace Hd2Qd.License
                 || key == null || !Regex.IsMatch(key, "^[89a-f][0-9a-f]{511}$"))   // RSA-2048, as the mod's check takes
                 return Err("bad_declaration");
             var name = Json.Str(d, "name")?.Trim();
-            return new Dictionary<string, object> { ["issuer"] = issuer, ["name"] = string.IsNullOrEmpty(name) ? issuer : name, ["key"] = key };
+            var r = new Dictionary<string, object> { ["issuer"] = issuer, ["name"] = string.IsNullOrEmpty(name) ? issuer : name, ["key"] = key };
+            if (ViaOf(modFolder) is string via) r["via"] = via;
+            return r;
+        }
+
+        /// <summary>(1.9.0) Where this package's player pays, from the mod's .hd2_license_via
+        /// ("patreon" or "afdian"): the creator ships one package per members' site, the same
+        /// mod but for this file, and the sign-in goes straight to that site. Null when the
+        /// package has none (the issuer then asks as before). A dot file, so Quick Deploy's
+        /// integrity check (0.22.0 and later) leaves it out: one signed manifest fits both
+        /// packages, and the file decides nothing but which site's sign-in opens.</summary>
+        static string ViaOf(string modFolder)
+        {
+            try
+            {
+                var path = Path.Combine(modFolder, ".hd2_license_via");
+                if (!File.Exists(path) || new FileInfo(path).Length > 64) return null;
+                var v = File.ReadAllText(path).Trim().ToLowerInvariant();
+                return v == "patreon" || v == "afdian" ? v : null;
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return null; }
         }
 
         /// <summary>The game accounts on this computer: the ids the game names its settings
@@ -157,7 +177,8 @@ namespace Hd2Qd.License
             var session = Hex(Random(16));
             Sessions[session] = s;
             var url = Base(Json.Str(decl, "issuer")) + "/login?c=" + Sha256Hex(s.Verifier) + "&s=" + s.State
-                      + "&port=" + loopback.Port + "&acct=" + accounts[0];
+                      + "&port=" + loopback.Port + "&acct=" + accounts[0]
+                      + (Json.Str(decl, "via") is string via && (via == "patreon" || via == "afdian") ? "&via=" + via : "");
             return new Dictionary<string, object> { ["url"] = url, ["session"] = session };
         }
 

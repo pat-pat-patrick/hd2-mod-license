@@ -149,6 +149,7 @@ namespace Hd2Qd.License
             head.Append("HD2 MOD LICENSE LOG 1\n");
             head.Append("issuer=").Append(issuer).Append('\n');
             head.Append("plugin=").Append(PluginVersion).Append('\n');
+            if (Json.Str(decl, "via") is string via) head.Append("via=").Append(via).Append('\n');
             if (manager != null) head.Append("manager=").Append(manager).Append('\n');
             head.Append("windows=").Append(WindowsVersion()).Append('\n');
             head.Append("sent=").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz")).Append('\n');

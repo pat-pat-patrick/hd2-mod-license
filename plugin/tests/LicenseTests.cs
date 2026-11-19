@@ -1194,7 +1194,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.8.0", Plugin.PluginVersion);
+            Assert.Equal("1.9.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1214,7 +1214,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.8.0\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.9.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1229,6 +1229,35 @@ namespace Hd2Qd.License.Tests
             var dead = Decl(LicensedMod("Dead", issuerName: "127.0.0.1:1"));
             Assert.Equal("network", Json.Str(Plugin.SendLog(Home, appData, dead), "error"));
             Assert.Contains("[127.0.0.1:1] POST /diag -> unreachable", File.ReadAllText(Plugin.LogPath(Home)));
+        }
+
+        /// <summary>(1.9.0) A package's .hd2_license_via says which members' site its sign-in
+        /// opens; packages of one creator from both sites leave the choice to the issuer.</summary>
+        [Fact]
+        public void A_packages_via_file_picks_the_members_site()
+        {
+            Account(A);
+            var afdian = LicensedMod("Afdian");
+            File.WriteAllText(Path.Combine(afdian, ".hd2_license_via"), "afdian\r\n");
+            Assert.Equal("afdian", Json.Str(Decl(afdian), "via"));
+            string Url(Dictionary<string, object> d) { var b = BeginSignIn(d); Plugin.AbandonSignIn(Json.Str(b, "session")); return Json.Str(b, "url"); }
+            Assert.EndsWith("&acct=" + A + "&via=afdian", Url(Decl(afdian)));
+
+            var plain = LicensedMod("Plain");
+            Assert.Null(Json.Str(Decl(plain), "via"));
+            Assert.DoesNotContain("via=", Url(Decl(plain)));
+            var odd = LicensedMod("Odd");
+            File.WriteAllText(Path.Combine(odd, ".hd2_license_via"), "paypal");
+            Assert.Null(Json.Str(Decl(odd), "via"));
+
+            InLibrary("Afdian", afdian);
+            Assert.Equal("afdian", Json.Str(Plugin.Issuers(library)[0].Decl, "via"));
+            var patreon = LicensedMod("Patreon");
+            File.WriteAllText(Path.Combine(patreon, ".hd2_license_via"), "patreon");
+            InLibrary("Patreon", patreon);
+            var mixed = Plugin.Issuers(library)[0].Decl;
+            Assert.Equal("mixed", Json.Str(mixed, "via"));
+            Assert.DoesNotContain("via=", Url(mixed));
         }
 
         /// <summary>(1.8.0) The 1.6.0/1.7.0 payload.log is the start of license.log.</summary>

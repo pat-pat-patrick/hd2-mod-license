@@ -47,7 +47,12 @@ namespace Hd2Qd.License
                 if (d == null || Json.Str(d, "error") != null) continue;
                 var at = found.FindIndex(x => Json.Str(x.Item1, "issuer") == Json.Str(d, "issuer") && Json.Str(x.Item1, "key") == Json.Str(d, "key"));
                 if (at < 0) found.Add((d, new List<string> { Json.Str(m, "name") }, path));
-                else found[at].Item2.Add(Json.Str(m, "name"));
+                else
+                {
+                    found[at].Item2.Add(Json.Str(m, "name"));
+                    // (1.9.0) packages from both members' sites: the issuer asks which, as before
+                    if (Json.Str(found[at].Item1, "via") != Json.Str(d, "via")) found[at].Item1["via"] = "mixed";
+                }
             }
             return found;
         }
