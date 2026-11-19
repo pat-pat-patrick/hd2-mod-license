@@ -129,11 +129,50 @@ namespace Hd2Qd.License
                 var k = Json.Str(body, "key");
                 byte[] key = TryBase64(k);
                 if (key == null || key.Length != 32) continue;
-                long grace = Json.Long(body, "grace");
-                CacheKey(appData, issuer, id, version, key, account, Now() + Math.Max(0, grace));
+                // kept for the grace only with the issuer's signed ticket, whose expiry the
+                // cache then follows: the expiry used to be a field of the DPAPI record, which the
+                // player can unprotect and rewrite (audit, 2026-11-19). An issuer that sends no good
+                // ticket gives this session its key and nothing to keep.
+                var ticket = Json.Str(body, "ticket");
+                if (ticket != null && VerifyTicket(ticket, issuer, PinnedKey(home, issuer), id, version, account, key) != null)
+                    CacheKey(appData, issuer, id, version, key, account, ticket);
                 return key;
             }
-            return CachedKey(appData, issuer, id, version, account);
+            return CachedKey(home, appData, issuer, id, version, account);
+        }
+
+        const string SessionHeader = "HD2 MOD SESSION 1\n";
+        // the local clock may be this much behind the issuer's and a ticket still counts (seconds)
+        const long ClockSlack = 600;
+
+        /// <summary>The key the member signed in with pinned for this issuer (the one claims check).</summary>
+        static string PinnedKey(string home, string issuer) => Json.Str(IssuerRecord(home, issuer), "key");
+
+        /// <summary>The fields of an issuer's session ticket (POST /session) when it is signed by the
+        /// pinned key and names this id, version, account and the key it came with; else null.</summary>
+        static Dictionary<string, string> VerifyTicket(string text, string issuer, string pinned, string id, string version, string account, byte[] key)
+        {
+            if (text == null || pinned == null) return null;
+            text = text.Replace("\r", "");
+            int at = text.IndexOf("\nsig=", StringComparison.Ordinal);
+            if (!text.StartsWith(SessionHeader, StringComparison.Ordinal) || at < 0) return null;
+            string signed = text.Substring(0, at + 1), sig = text.Substring(at + 5).Trim();
+            var f = Fields(signed);
+            if (!f.TryGetValue("issuer", out var iss) || iss != issuer) return null;
+            if (!f.TryGetValue("id", out var tid) || tid != id || !f.TryGetValue("version", out var tv) || tv != version
+                || !f.TryGetValue("account", out var ta) || ta != account) return null;
+            if (!f.TryGetValue("issued", out var issued) || !long.TryParse(issued, out _)
+                || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)) return null;
+            using (var sha = SHA256.Create())
+                if (!f.TryGetValue("key_hash", out var kh) || kh != Hex(sha.ComputeHash(key))) return null;
+            var modulus = Bytes(pinned);
+            if (!System.Text.RegularExpressions.Regex.IsMatch(sig, "^[0-9a-fA-F]+$") || sig.Length != modulus.Length * 2) return null;
+            using (var rsa = new RSACng())
+            {
+                rsa.ImportParameters(new RSAParameters { Modulus = modulus, Exponent = new byte[] { 1, 0, 1 } });
+                if (!rsa.VerifyData(Encoding.UTF8.GetBytes(signed), Bytes(sig), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)) return null;
+            }
+            return f;
         }
 
         static byte[] TryBase64(string s)
@@ -142,12 +181,12 @@ namespace Hd2Qd.License
             catch (FormatException) { return null; }
         }
 
-        static void CacheKey(string appData, string issuer, string id, string version, byte[] key, string account, long expires)
+        static void CacheKey(string appData, string issuer, string id, string version, byte[] key, string account, string ticket)
         {
             var dir = SegmentsFolder(appData, issuer, id, version);
             Directory.CreateDirectory(dir);
             var record = Json.Write(new Dictionary<string, object>
-            { ["k"] = Convert.ToBase64String(key), ["account"] = account, ["exp"] = expires });
+            { ["k"] = Convert.ToBase64String(key), ["account"] = account, ["t"] = ticket });
             var prot = ProtectedData.Protect(Encoding.UTF8.GetBytes(record), KeyEntropy, DataProtectionScope.CurrentUser);
             var path = Path.Combine(dir, KeyCacheFile);
             var tmp = path + ".tmp";
@@ -156,7 +195,10 @@ namespace Hd2Qd.License
             File.Move(tmp, path);
         }
 
-        static byte[] CachedKey(string appData, string issuer, string id, string version, string account)
+        /// <summary>The cached key while its signed ticket holds: the ticket's own expiry, and a clock
+        /// no earlier than when the issuer signed it (a clock set back before that is not trusted:
+        /// audit, 2026-11-19). A record without a good ticket opens nothing.</summary>
+        static byte[] CachedKey(string home, string appData, string issuer, string id, string version, string account)
         {
             var path = Path.Combine(SegmentsFolder(appData, issuer, id, version), KeyCacheFile);
             if (!File.Exists(path)) return null;
@@ -165,9 +207,13 @@ namespace Hd2Qd.License
                 // DPAPI(CurrentUser): this fails on another machine or user, so a copied cache opens nothing
                 var bytes = ProtectedData.Unprotect(File.ReadAllBytes(path), KeyEntropy, DataProtectionScope.CurrentUser);
                 var d = Json.Parse(Encoding.UTF8.GetString(bytes)) as Dictionary<string, object>;
-                if (Json.Str(d, "account") != account || Json.Long(d, "exp") <= Now()) return null;
+                if (Json.Str(d, "account") != account) return null;
                 var key = TryBase64(Json.Str(d, "k"));
-                return key != null && key.Length == 32 ? key : null;
+                if (key == null || key.Length != 32) return null;
+                var f = VerifyTicket(Json.Str(d, "t"), issuer, PinnedKey(home, issuer), id, version, account, key);
+                if (f == null) return null;
+                long now = Now(), issued = long.Parse(f["issued"]), expires = long.Parse(f["expires"]);
+                return now < expires && now >= issued - ClockSlack ? key : null;
             }
             catch (Exception e) when (e is CryptographicException || e is FormatException || e is IOException || e is UnauthorizedAccessException) { return null; }
         }
@@ -230,8 +276,12 @@ namespace Hd2Qd.License
             }
         }
 
-        /// <summary>Removes the per-session plaintext (seg*.lua) from every sealed version folder
-        /// here -- a folder that has a seg*.enc. The ciphertext, receipt and key cache stay.</summary>
+        /// <summary>Removes the per-session plaintext (seg*.lua) from every version folder here whose
+        /// plaintext is not a claim of its own: everything but a set whose receipt is a SEGMENTS 1
+        /// (plaintext-era) receipt signed by the issuer's pinned key. A sealed set is known by that
+        /// signed receipt, not by its seg*.enc being there: with the .enc deleted and "sealed" taken
+        /// out of the mod, the plaintext used to be left for good (audit, 2026-11-19). The
+        /// ciphertext, receipt and key cache stay.</summary>
         static void ClearAllPlain(string home, string appData)
         {
             var root = LicenseDir(appData);
@@ -244,11 +294,29 @@ namespace Hd2Qd.License
                         {
                             try
                             {
-                                if (!Directory.EnumerateFiles(ver, "seg*.enc").Any()) continue;   // not a sealed set
-                                foreach (var lua in Directory.GetFiles(ver, "seg*.lua")) File.Delete(lua);
+                                var lua = Directory.GetFiles(ver, "seg*.lua");
+                                if (lua.Length == 0 || PlaintextClaim(home, Path.GetFileName(iss), ver)) continue;
+                                foreach (var f in lua) File.Delete(f);
                             }
                             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
                         }
+        }
+
+        /// <summary>Whether a version folder's receipt is a plaintext-era (SEGMENTS 1) receipt that
+        /// the issuer named by the folder signed with the key pinned for it.</summary>
+        static bool PlaintextClaim(string home, string issuerFolder, string ver)
+        {
+            var receipt = Path.Combine(ver, "receipt.txt");
+            if (!File.Exists(receipt)) return false;
+            var text = File.ReadAllText(receipt).Replace("\r", "");
+            if (!text.StartsWith(SegmentsHeader, StringComparison.Ordinal)) return false;
+            // the folder is the issuer's host with ':' made '_' (SegmentsRoot)
+            foreach (var issuer in new[] { issuerFolder, issuerFolder.Replace('_', ':') }.Distinct())
+            {
+                var pinned = PinnedKey(home, issuer);
+                if (pinned != null && VerifyReceipt(text, issuer, pinned) != null) return true;
+            }
+            return false;
         }
 
         static IEnumerable<string> SafeDirs(string dir)

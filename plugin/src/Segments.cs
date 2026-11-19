@@ -118,11 +118,16 @@ namespace Hd2Qd.License
             // sealed_hash covers it, so a held set can be checked offline, without the content key.
             // The plaintext seg<i>.lua appears only while the game runs (Session.cs).
             bool sealedV = Json.Bool(seg, "sealed");
-            string ext = sealedV ? "enc" : "lua", hashField = sealedV ? "sealed_hash" : "segments_hash";
             try
             {
                 var receipt = Path.Combine(dir, "receipt.txt");
                 if (!File.Exists(receipt)) return null;
+                // a SEGMENTS 2 (sealed) receipt is held only as ciphertext, whatever the mod's
+                // hd2_license.json says: with "sealed" taken out of it, plaintext seg*.lua matched
+                // the receipt's segments_hash and counted as a claim (audit, 2026-11-19)
+                using (var r = new StreamReader(receipt))
+                    if (r.ReadLine() == SegmentsHeader2.TrimEnd('\n')) sealedV = true;
+                string ext = sealedV ? "enc" : "lua", hashField = sealedV ? "sealed_hash" : "segments_hash";
                 // the rows ask on every redraw: the files are read again only when one changed
                 var stamp = new StringBuilder(key).Append('|').Append(ext).Append('|').Append(File.GetLastWriteTimeUtc(receipt).Ticks);
                 for (long i = 1; i <= count; i++)

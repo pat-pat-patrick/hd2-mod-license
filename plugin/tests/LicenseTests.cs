@@ -847,6 +847,77 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("bad_receipt", Json.Str(Claim(mod), "error"));
         }
 
+        /// <summary>The cache's expiry is the issuer's signed ticket's, not a field of the DPAPI record
+        /// the player can unprotect and rewrite (audit, 2026-11-19).</summary>
+        [Fact]
+        public void A_cache_with_a_rewritten_expiry_does_not_open()
+        {
+            var dir = ClaimedC1(out var mod);
+            var key = issuer.Keys["v1.2.0"];
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            void Cache(Dictionary<string, object> record) => File.WriteAllBytes(Path.Combine(dir, "key.dpapi"),
+                ProtectedData.Protect(Encoding.UTF8.GetBytes(Json.Write(record)), Encoding.ASCII.GetBytes("hd2qd-license-session-1"), DataProtectionScope.CurrentUser));
+            issuer.SessionError = "network_stub";
+            SetClock(() => now + 40 * 86400);                       // past the ticket's 20-day grace
+            // the right key, a far expiry of the record's own, and the genuine ticket: the ticket rules
+            Cache(new Dictionary<string, object> { ["k"] = Convert.ToBase64String(key), ["account"] = A, ["exp"] = now + 999 * 86400,
+                                                   ["t"] = issuer.Ticket("sealed-mod", "v1.2.0", A, key, now, issuer.Grace) });
+            Assert.False(Plugin.OnGameStart(Host()), "the record's own expiry is not believed");
+            // a ticket whose expiry was edited no longer verifies
+            var forged = issuer.Ticket("sealed-mod", "v1.2.0", A, key, now, issuer.Grace).Replace("expires=" + (now + issuer.Grace), "expires=" + (now + 999 * 86400));
+            Cache(new Dictionary<string, object> { ["k"] = Convert.ToBase64String(key), ["account"] = A, ["t"] = forged });
+            Assert.False(Plugin.OnGameStart(Host()), "an edited ticket does not verify");
+            // a ticket signed by another key (not the pinned one) does not count either
+            Cache(new Dictionary<string, object> { ["k"] = Convert.ToBase64String(key), ["account"] = A,
+                                                   ["t"] = issuer.Ticket("sealed-mod", "v1.2.0", A, key, now, 999L * 86400, "b") });
+            Assert.False(Plugin.OnGameStart(Host()), "a ticket not signed by the pinned key does not count");
+            // must-live: the genuine ticket within its expiry opens
+            SetClock(() => now + 5 * 86400);
+            Cache(new Dictionary<string, object> { ["k"] = Convert.ToBase64String(key), ["account"] = A,
+                                                   ["t"] = issuer.Ticket("sealed-mod", "v1.2.0", A, key, now, issuer.Grace) });
+            Assert.True(Plugin.OnGameStart(Host()), "a genuine ticket within its expiry opens the cache");
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        /// <summary>A clock set back before the issuer signed the ticket is not trusted (audit, 2026-11-19).</summary>
+        [Fact]
+        public void A_clock_set_back_before_the_ticket_opens_no_cache()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()));               // online: the key and its ticket are cached
+            Plugin.OnGameStop(Host());
+            issuer.SessionError = "network_stub";
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 2 * 86400);
+            Assert.False(Plugin.OnGameStart(Host()), "two days before the ticket was signed");
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 60);
+            Assert.True(Plugin.OnGameStart(Host()), "a minute behind the issuer is ordinary clock skew");
+        }
+
+        /// <summary>An issuer that sends no ticket gives this session its key and nothing to keep.</summary>
+        [Fact]
+        public void Without_a_ticket_the_key_is_used_but_not_kept()
+        {
+            var dir = ClaimedC1(out var mod);
+            issuer.SessionNoTicket = true;
+            Assert.True(Plugin.OnGameStart(Host()), "online, the session still decrypts");
+            Assert.False(File.Exists(Path.Combine(dir, "key.dpapi")), "but no key is kept for later");
+        }
+
+        /// <summary>Plaintext of a sealed claim is removed whatever was done to the folder or the mod:
+        /// the .enc deleted and "sealed" taken out of hd2_license.json left it for good (audit, 2026-11-19).</summary>
+        [Fact]
+        public void Sealed_plaintext_is_cleared_and_not_held_even_with_the_ciphertext_gone()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(Plugin.OnGameStart(Host()));
+            foreach (var enc in Directory.GetFiles(dir, "seg*.enc")) File.Delete(enc);
+            var seg = Plugin.SegmentsOf(mod);
+            seg["sealed"] = false;                                  // as if "sealed" were taken out of the mod
+            Assert.Null(Plugin.HeldAccount(appData, Decl(mod), seg));
+            Plugin.OnGameStop(Host());
+            for (int i = 1; i <= 8; i++) Assert.False(File.Exists(Path.Combine(dir, "seg" + i + ".lua")), "seg" + i + ".lua left behind");
+        }
+
         [Fact]
         public void A_wrong_session_key_decrypts_nothing()
         {
@@ -1164,6 +1235,8 @@ namespace Hd2Qd.License.Tests
             public long Grace = 20 * 86400;
             public int SessionCalls;
             public string SessionError;
+            /// <summary>(audit 2026-11-19) /session answers without its signed ticket (an older issuer).</summary>
+            public bool SessionNoTicket;
 
             /// <summary>Marks a version sealed (C1): it gets a content key, and /segments serves it as
             /// ciphertext when the plugin asks with enc.</summary>
@@ -1190,6 +1263,16 @@ namespace Hd2Qd.License.Tests
                 var text = "HD2 MOD SEGMENTS 2" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
                            "alg=A256CBC" + NL + "segments_hash=" + plainHash + NL + "sealed_hash=" + sealedHash + NL + "issued=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds() + NL;
                 return Sign(key, text);
+            }
+
+            /// <summary>The issuer's signed session ticket (POST /session): the key's hash and its expiry.</summary>
+            public string Ticket(string id, string version, string account, byte[] key, long issued, long grace, string signWith = "a")
+            {
+                string kh;
+                using (var sha = SHA256.Create()) kh = string.Concat(sha.ComputeHash(key).Select(b => b.ToString("x2")));
+                var text = "HD2 MOD SESSION 1" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
+                           "key_hash=" + kh + NL + "issued=" + issued + NL + "expires=" + (issued + grace) + NL;
+                return Sign(signWith, text);
             }
 
             string Sign(string key, string text)
@@ -1370,7 +1453,9 @@ namespace Hd2Qd.License.Tests
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
                     if (!sm.Accounts.Contains(acct)) return (403, new Dictionary<string, object> { ["error"] = "account" });
                     if (!Keys.ContainsKey(version)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
-                    return (200, new Dictionary<string, object> { ["key"] = Convert.ToBase64String(Keys[version]), ["grace"] = Grace });
+                    var answer = new Dictionary<string, object> { ["key"] = Convert.ToBase64String(Keys[version]), ["grace"] = Grace };
+                    if (!SessionNoTicket) answer["ticket"] = Ticket(id, version, acct, Keys[version], DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Grace);
+                    return (200, answer);
                 }
                 if (path == "/claim")
                 {
