@@ -64,8 +64,11 @@ namespace Hd2Qd.License
                 if (host == null) return;
                 bool now = GameRunning();
                 if (gameWas == now) return;              // no change (and not the first tick)
+                bool first = gameWas == null;
                 gameWas = now;
-                if (now) OnGameStart(host); else OnGameStop(host);
+                // the game already running at this program's first look: it started before the
+                // manager, so what is decrypted now comes too late for this game
+                if (now) OnGameStart(host, first); else OnGameStop(host);
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException) { }
             finally { Interlocked.Exchange(ref gameBusy, 0); }
@@ -74,7 +77,25 @@ namespace Hd2Qd.License
         /// <summary>A game start: every library mod that ships sealed segments and holds its version's
         /// ciphertext here is decrypted into the plaintext the shell reads, if the content key can be
         /// had (online now, or cached within the grace). True when any set was decrypted.</summary>
-        public static bool OnGameStart(Dictionary<string, object> host)
+        public static bool OnGameStart(Dictionary<string, object> host) => OnGameStart(host, false);
+
+        /// <summary>How the last game start went for a sealed mod (its folder), when it went wrong:
+        /// "late" (the game started before this program, so its content stayed locked that game),
+        /// "no_key" (no content key: offline past the grace). Null when it was unlocked in time.
+        /// For the mod's row in the manager (ModNote); kept for this program's run only.</summary>
+        public static string LastUnlock(string modFolder)
+        {
+            lock (lastUnlock) return modFolder != null && lastUnlock.TryGetValue(modFolder, out var v) ? v : null;
+        }
+
+        static readonly Dictionary<string, string> lastUnlock = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        static void SetLastUnlock(string modFolder, string what)
+        {
+            lock (lastUnlock) { if (what == null) lastUnlock.Remove(modFolder); else lastUnlock[modFolder] = what; }
+        }
+
+        public static bool OnGameStart(Dictionary<string, object> host, bool late)
         {
             bool any = false;
             string home = Home(host), appData = AppData(host);
@@ -92,8 +113,13 @@ namespace Hd2Qd.License
                         var held = HeldAccount(appData, decl, seg);
                         if (held == null) continue;                 // no resident ciphertext to open
                         var key = SessionKey(home, appData, decl, seg, held);
-                        if (key == null) { Log(home, SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
-                        if (DecryptPlain(appData, decl, seg, key)) { any = true; Log(home, SegLabel(path, seg) + ": decrypted for this session (account " + held + ")"); }
+                        if (key == null) { SetLastUnlock(path, "no_key"); Log(home, SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
+                        if (DecryptPlain(appData, decl, seg, key))
+                        {
+                            any = true;
+                            SetLastUnlock(path, late ? "late" : null);
+                            Log(home, SegLabel(path, seg) + (late ? ": decrypted, but the game started before this program: unlocked from the next game" : ": decrypted for this session") + " (account " + held + ")");
+                        }
                         else Log(home, SegLabel(path, seg) + ": the content did not decrypt to what the receipt signs (sealed)");
                         Array.Clear(key, 0, key.Length);
                     }

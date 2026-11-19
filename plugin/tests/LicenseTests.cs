@@ -1185,6 +1185,29 @@ namespace Hd2Qd.License.Tests
             Assert.True(Plugin.RunsOnInTray(H("1.0.0")));
         }
 
+        /// <summary>A sealed mod's row says when its content was, or will be, left locked in a game,
+        /// and says nothing when all is well (the user, 2026-11-19: log and manager only).</summary>
+        [Fact]
+        public void A_sealed_mods_row_says_when_its_content_stays_locked()
+        {
+            issuer.Grace = 86400;                                                                       // a one-day key, so it lapses before the licence
+            var dir = ClaimedC1(out var mod);
+            Dictionary<string, object> H(string v = "0.22.0") { var h = Host("zh-CN"); if (v != null) h["version"] = v; return h; }
+            Assert.Equal("游戏启动时需开着本程序", Json.Str(Plugin.ModNote(mod, H(null)), "text"));     // a manager before 0.22.0
+            Assert.Null(Plugin.ModNote(mod, H()));                                                        // claimed, nothing went wrong
+            Assert.True(Plugin.OnGameStart(H(), true));                                                   // the game was already running
+            Assert.Equal("本局未解锁：游戏先于本程序启动", Json.Str(Plugin.ModNote(mod, H()), "text"));
+            Assert.Equal("late", Plugin.LastUnlock(mod));
+            Plugin.OnGameStop(H());
+            Assert.True(Plugin.OnGameStart(H()));                                                         // in time: the word goes
+            Assert.Null(Plugin.ModNote(mod, H()));
+            Plugin.OnGameStop(H());
+            issuer.SessionError = "network_stub";
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 2 * 86400);                      // offline past the key's grace, licence still good
+            Assert.False(Plugin.OnGameStart(H()));
+            Assert.Equal("上一局未解锁：离线超过宽限期", Json.Str(Plugin.ModNote(mod, H()), "text"));
+        }
+
         [Fact]
         public void The_start_and_the_command_claim_what_is_missing()
         {

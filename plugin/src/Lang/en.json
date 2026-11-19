@@ -60,6 +60,11 @@
   "lic_err_account": "This game account is not bound to the membership signed in on this computer.",
   "row_segments": "Member content missing",
   "row_segments_pending": "Awaiting the author",
+  "row_needs_window": "Keep this program open when the game starts",
+  "row_unlock_late": "Locked this game: the game started first",
+  "row_unlock_late_tip": "This program unlocks the member content when the game starts, and this game started before it was running, so the mod does nothing in this game; it works from the next game. Open this program before the game, or turn on Start with Windows in the settings.",
+  "row_unlock_no_key": "Locked last game: offline past the grace",
+  "row_unlock_no_key_tip": "The key that unlocks the member content has to be renewed online now and then. At the last game start this computer had been offline longer than the grace, so the mod did nothing in that game. Go online and start the game again.",
   "row_segments_tip": "This version's member content has not been downloaded. See the Plugins page.",
   "cancel": "Cancel",
   "failed": "Failed: {0}"

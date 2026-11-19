@@ -95,9 +95,23 @@ namespace Hd2Qd.License
             string seg;
             try { seg = SegmentsState(Home(host), AppData(host), modFolder); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return null; }
-            if (seg == null || seg == "claimed") return null;
-            if (seg == "missing") ClaimLater(host, modFolder, SegmentsOf(modFolder));
             string lang = Words.Lang(host);
+            if (seg == "claimed")
+            {
+                // a sealed (C1) mod held here: a word only when its content was, or will be, left
+                // locked in a game (the user, 2026-11-19: "log and manager only", nothing in game)
+                if (!Json.Bool(SegmentsOf(modFolder), "sealed")) return null;
+                string why = !RunsOnInTray(host) ? "row_needs_window"
+                    : LastUnlock(modFolder) == "late" ? "row_unlock_late"
+                    : LastUnlock(modFolder) == "no_key" ? "row_unlock_no_key" : null;
+                if (why == null) return null;
+                return new Dictionary<string, object>
+                {
+                    ["text"] = Words.Get(lang, why), ["tip"] = Words.Get(lang, why == "row_needs_window" ? "seg_needs_tray" : why + "_tip"), ["colour"] = "Yellow",
+                };
+            }
+            if (seg == null) return null;
+            if (seg == "missing") ClaimLater(host, modFolder, SegmentsOf(modFolder));
             return new Dictionary<string, object>
             {
                 ["text"] = Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending" : "row_segments"),
