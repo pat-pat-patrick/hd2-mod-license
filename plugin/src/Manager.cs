@@ -151,6 +151,7 @@ namespace Hd2Qd.License
             new[] { "license-renew", "renew the licenses that are half way to their end (--force: every one now)" },
             new[] { "license-segments", "download the member content of the library's mods that ship it per game account (the manager does this by itself at its start; --force: download again)" },
             new[] { "license-answer", "answer the question a licensed mod asked at its start (the manager does this by itself while it runs)" },
+            new[] { "license-log-send", "send this computer's license log (sign-ins, renewals, checks, member content) to a mod author's issuer (license-log-send ISSUER; with one author in the library, ISSUER may be left out): it prints the code to give the author" },
             new[] { "license-logout", "remove an issuer's license and sign-in from this computer (license-logout ISSUER)" },
         };
 
@@ -242,6 +243,29 @@ namespace Hd2Qd.License
                         o.WriteLine(name + ": " + SegmentsCommandWords(st));
                     }
                     if (none) o.WriteLine("no mod in the library ships member content per game account");
+                    o.WriteLine("log: " + LogPath(home));
+                    return 0;
+                }
+                case "license-log-send":
+                {
+                    if (args.Length > 1) { o.WriteLine("usage: hd2qd license-log-send [ISSUER]"); return 2; }
+                    Dictionary<string, object> decl;
+                    if (args.Length == 1) decl = IssuerArg(home, library, args[0]);
+                    else
+                    {
+                        var all = Known(home, library).Select(x => x.Decl).Where(d => !TestIssuer(Json.Str(d, "issuer"))).ToList();
+                        if (all.Count != 1) { o.WriteLine(all.Count == 0 ? "no mod author in the library or signed in here" : "usage: hd2qd license-log-send ISSUER (license lists them)"); return 2; }
+                        decl = all[0];
+                    }
+                    var manager = host.TryGetValue("version", out var mv) ? mv as string : null;
+                    var r = SendLog(home, appData, decl, manager);
+                    var code = Json.Str(r, "code");
+                    if (code == null)
+                        throw new InvalidOperationException(Json.Str(r, "error") == "rate" ? "too many logs sent today: try again tomorrow"
+                            : Json.Str(r, "error") == "no_diag" ? Json.Str(decl, "issuer") + " takes no license logs"
+                            : Json.Str(r, "error") == "empty" ? "nothing logged about " + Json.Str(decl, "issuer") + " yet"
+                            : Json.Str(r, "error") == "test_issuer" ? CommandError("test_issuer") : CommandError(Json.Str(r, "error")));
+                    o.WriteLine("sent to " + Json.Str(decl, "issuer") + ": code " + code + " (give it to the author; kept " + Json.Long(r, "days") + " days)");
                     o.WriteLine("log: " + LogPath(home));
                     return 0;
                 }

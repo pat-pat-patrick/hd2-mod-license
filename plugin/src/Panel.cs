@@ -19,6 +19,7 @@ namespace Hd2Qd.License
     {
         static CancellationTokenSource wait;
         static string signingIn;
+        static string sendingLog;        // (1.8.0) the issuer a log is being sent to
 
         static Style Style(string key) => Application.Current?.TryFindResource(key) as Style;
         static Brush Brush(string key) => Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray;
@@ -141,6 +142,14 @@ namespace Hd2Qd.License
                     var again = new Button { Content = Words.Get(lang, "seg_claim"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
                     again.Click += (s, e) => ClaimNow(host, false);
                     buttons.Children.Add(again);
+                }
+                // (1.8.0) the log of this author's sign-ins, renewals and claims, to the author
+                if (!busy && !TestIssuer(issuer))
+                {
+                    var send = new Button { Content = Words.Get(lang, "lic_send_log"), Style = Style("Ghost"), MinHeight = 36,
+                                            Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0), IsEnabled = signingIn == null && sendingLog == null };
+                    send.Click += (s, e) => SendLogNow(decl, host);
+                    buttons.Children.Add(send);
                 }
                 var block = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
                 block.Children.Add(line);
@@ -266,6 +275,42 @@ namespace Hd2Qd.License
             else
             {
                 var words = error == "no_account" || error == "test_issuer" ? Words.Get(lang, "lic_" + error) : ErrorWords(r, lang);
+                Foot(host, words, "Yellow");
+                Tell(host, words);
+            }
+            Refresh(host);
+        }
+
+        /// <summary>(1.8.0) Sending the license log to one author: asked first (saying what is in
+        /// it), then sent in the background; the code is copied and shown.</summary>
+        static async void SendLogNow(Dictionary<string, object> decl, Dictionary<string, object> host)
+        {
+            string lang = Words.Lang(host);
+            string home = Home(host), appData = AppData(host), issuer = Json.Str(decl, "issuer");
+            if (!Ask(host, Words.F(lang, "lic_send_log_ask", Json.Str(decl, "name"), issuer), Words.Get(lang, "lic_send_log"))) return;
+            sendingLog = issuer;
+            Refresh(host);
+            Foot(host, Words.Get(lang, "lic_send_log_waiting"), "Blue");
+            var manager = host.TryGetValue("version", out var v) ? v as string : null;
+            Dictionary<string, object> r;
+            try { r = await Task.Run(() => SendLog(home, appData, decl, manager)); }
+            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { r = new Dictionary<string, object> { ["error"] = "other", ["detail"] = x.Message }; }
+            finally { sendingLog = null; }
+            var code = Json.Str(r, "code");
+            if (code != null)
+            {
+                bool copied = false;
+                try { Clipboard.SetText(code); copied = true; }
+                catch (Exception x) when (x is System.Runtime.InteropServices.COMException || x is System.Threading.ThreadStateException) { }
+                var words = Words.F(lang, copied ? "lic_send_log_done" : "lic_send_log_done_nocopy", code, Json.Long(r, "days") > 0 ? Json.Long(r, "days") : 30);
+                Foot(host, words, "Blue");
+                Tell(host, words);
+            }
+            else
+            {
+                var error = Json.Str(r, "error");
+                var words = error == "rate" || error == "no_diag" || error == "empty" ? Words.Get(lang, "lic_send_log_" + error)
+                    : error == "network" ? Words.Get(lang, "lic_err_network") : Words.F(lang, "failed", Json.Str(r, "detail") ?? error);
                 Foot(host, words, "Yellow");
                 Tell(host, words);
             }

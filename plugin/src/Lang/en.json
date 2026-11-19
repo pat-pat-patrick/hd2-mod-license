@@ -67,5 +67,13 @@
   "row_unlock_no_key_tip": "The key that unlocks the member content has to be renewed online now and then. At the last game start this computer had been offline longer than the grace, so the mod did nothing in that game. Go online and start the game again.",
   "row_segments_tip": "This version's member content has not been downloaded. See the Plugins page.",
   "cancel": "Cancel",
-  "failed": "Failed: {0}"
+  "failed": "Failed: {0}",
+  "lic_send_log": "Send license log",
+  "lic_send_log_ask": "Send this computer's license log to {0} ({1})? It records sign-ins, renewals, license checks and member content downloads, with this computer's game account ids; no passwords or tokens. The author reads it with a code; it is kept for 30 days.",
+  "lic_send_log_waiting": "Sending the license log…",
+  "lic_send_log_done": "The license log has been sent. The code {0} is copied to the clipboard: send it to the author (valid for {1} days).",
+  "lic_send_log_done_nocopy": "The license log has been sent. Send the code {0} to the author (valid for {1} days).",
+  "lic_send_log_rate": "The daily limit for sending logs has been reached. Try again tomorrow.",
+  "lic_send_log_no_diag": "This author's site does not accept license logs yet.",
+  "lic_send_log_empty": "This computer has no license log for this author yet."
 }

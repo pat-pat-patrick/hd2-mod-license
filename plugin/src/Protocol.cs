@@ -96,7 +96,9 @@ namespace Hd2Qd.License
         public static Dictionary<string, object> Status(string home, string appData, Dictionary<string, object> decl)
         {
             var r = StatusOf(home, appData, decl);
-            return TestIssuer(Json.Str(decl, "issuer")) && Json.Str(r, "state") != "licensed" ? With(r, "test_issuer") : r;
+            r = TestIssuer(Json.Str(decl, "issuer")) && Json.Str(r, "state") != "licensed" ? With(r, "test_issuer") : r;
+            LogState(home, appData, r);
+            return r;
         }
 
         static Dictionary<string, object> StatusOf(string home, string appData, Dictionary<string, object> decl)
@@ -181,11 +183,23 @@ namespace Hd2Qd.License
                 Loopback.Return back;
                 try { back = s.Loopback.Receive(s.State, DateTime.UtcNow.AddSeconds(timeoutSeconds), cancel); }
                 catch (OperationCanceledException) { return Err("cancelled"); }
-                if (back == null) return Err("timeout");
+                if (back == null) { Log(home, Json.Str(decl, "issuer"), "sign-in: timeout (the browser did not come back)"); return Err("timeout"); }
                 var r = Claim(home, appData, decl, back, s.Verifier);
                 back.Reply(Page(r, lang));
+                Log(home, Json.Str(decl, "issuer"), "sign-in: " + OutcomeWords(r));
                 return r;
             }
+        }
+
+        /// <summary>A sign-in's, activation's or renewal's result for the log.</summary>
+        static string OutcomeWords(Dictionary<string, object> r)
+        {
+            if (Json.Str(r, "error") is string e)
+                return e + (Json.Long(r, "wait_days") > 0 ? " (wait " + Json.Long(r, "wait_days") + " days)" : "")
+                         + (Json.Str(r, "detail") is string d ? " (" + d + ")" : "");
+            if (r.ContainsKey("expires"))
+                return "ok, until " + DateTimeOffset.FromUnixTimeSeconds(Json.Long(r, "expires")).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+            return Json.Bool(r, "renewed") ? "ok" : "nothing due";
         }
 
         static Dictionary<string, object> Claim(string home, string appData, Dictionary<string, object> decl, Loopback.Return back, string verifier)
@@ -195,7 +209,7 @@ namespace Hd2Qd.License
                 return WithWait(Err(Regex.IsMatch(refused, "^[a-z_]{1,32}$") ? refused : "other"), back["wait_days"]);
             var code = back["code"];
             if (code == null || !Regex.IsMatch(code, "^[0-9a-f]{32}$")) return Err("other");
-            var (status, body) = Post(issuer, "/claim", new Dictionary<string, object> { ["code"] = code, ["verifier"] = verifier });
+            var (status, body) = Post(home, issuer, "/claim", new Dictionary<string, object> { ["code"] = code, ["verifier"] = verifier });
             if (status == 403) return WithWait(Err(Json.Str(body, "error") ?? "network"), Json.Long(body, "wait_days").ToString());
             if (status != 200 || body == null) return Err("network");
             return Keep(home, appData, decl, body);
@@ -251,12 +265,19 @@ namespace Hd2Qd.License
         /// takes no codes), "network", "bad_license".</summary>
         public static Dictionary<string, object> Redeem(string home, string appData, Dictionary<string, object> decl, string typed)
         {
+            var r = RedeemOnce(home, appData, decl, typed);
+            Log(home, Json.Str(decl, "issuer"), "activation code: " + OutcomeWords(r));
+            return r;
+        }
+
+        static Dictionary<string, object> RedeemOnce(string home, string appData, Dictionary<string, object> decl, string typed)
+        {
             if (TestIssuer(Json.Str(decl, "issuer"))) return Err("test_issuer");
             var code = NormalizeCode(typed);
             if (code == null) return Err("bad_code");
             var accounts = Accounts(appData);
             if (accounts.Count == 0) return Err("no_account");
-            var (status, body) = Post(Json.Str(decl, "issuer"), "/redeem", new Dictionary<string, object> { ["code"] = code, ["acct"] = accounts[0] });
+            var (status, body) = Post(home, Json.Str(decl, "issuer"), "/redeem", new Dictionary<string, object> { ["code"] = code, ["acct"] = accounts[0] });
             string error = Json.Str(body, "error");
             if (status == 404) return Err("no_codes");                  // an issuer that has no /redeem, or takes no codes
             if (status == 400) return Err(error == "bad_code" ? "bad_code" : "other");
@@ -291,6 +312,13 @@ namespace Hd2Qd.License
         /// end; the others are renewed all the same.</summary>
         public static Dictionary<string, object> Renew(string home, string appData, Dictionary<string, object> decl, bool force)
         {
+            var r = RenewOnce(home, appData, decl, force);
+            if (Json.Bool(r, "renewed") || Json.Str(r, "error") != null) Log(home, Json.Str(decl, "issuer"), "renewal: " + OutcomeWords(r));
+            return r;
+        }
+
+        static Dictionary<string, object> RenewOnce(string home, string appData, Dictionary<string, object> decl, bool force)
+        {
             string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key");
             var rec = IssuerRecord(home, issuer);
             var tokens = RenewTokens(rec);
@@ -304,7 +332,7 @@ namespace Hd2Qd.License
             {
                 var mine = held.Where(f => Holder(f) == holder).OrderByDescending(Expires).FirstOrDefault();
                 if (!force && mine != null && !Due(mine, now)) continue;
-                var (status, body) = Post(issuer, "/renew", new Dictionary<string, object> { ["renew"] = token });
+                var (status, body) = Post(home, issuer, "/renew", new Dictionary<string, object> { ["renew"] = token });
                 if (status != 200) { error = error ?? (status == 403 ? Json.Str(body, "error") ?? "network" : "network"); continue; }
                 var got = Json.Str(body, "license");
                 var f = got == null ? null : Verify(got, issuer, key);
@@ -332,6 +360,7 @@ namespace Hd2Qd.License
             var path = LicensePath(appData, issuer);
             if (File.Exists(path)) File.Delete(path);
             SaveIssuer(home, issuer, null);
+            Log(home, issuer, "signed out on this computer");
         }
 
         /// <summary>The issuers signed in on this computer, each as {issuer, name, key}: so the
@@ -498,21 +527,32 @@ namespace Hd2Qd.License
         static string Base(string issuer) =>
             (issuer.StartsWith("localhost:") || issuer.StartsWith("127.0.0.1:") ? "http://" : "https://") + issuer;
 
-        /// <summary>(status, body); status 0 when the issuer could not be reached.</summary>
-        static (int, Dictionary<string, object>) Post(string issuer, string path, Dictionary<string, object> body)
+        /// <summary>(status, body); status 0 when the issuer could not be reached. (1.8.0) Each
+        /// request and its answer is a line of the plugin's log (Log.cs), and says the plugin's
+        /// version to the issuer (header X-HD2QD-License), whose own request log shows it.</summary>
+        static (int, Dictionary<string, object>) Post(string home, string issuer, string path, Dictionary<string, object> body)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int status = 0;
+            Dictionary<string, object> d = null;
+            Exception failed = null;
             try
             {
                 using (var content = new StringContent(Json.Write(body), Encoding.UTF8, "application/json"))
-                using (var r = Http.PostAsync(Base(issuer) + path, content).GetAwaiter().GetResult())
+                using (var request = new HttpRequestMessage(HttpMethod.Post, Base(issuer) + path) { Content = content })
                 {
-                    var text = r.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                    Dictionary<string, object> d = null;
-                    try { d = Json.Parse(text) as Dictionary<string, object>; } catch (FormatException) { }
-                    return ((int)r.StatusCode, d);
+                    request.Headers.TryAddWithoutValidation("X-HD2QD-License", PluginVersion);
+                    using (var r = Http.SendAsync(request).GetAwaiter().GetResult())
+                    {
+                        var text = r.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                        try { d = Json.Parse(text) as Dictionary<string, object>; } catch (FormatException) { }
+                        status = (int)r.StatusCode;
+                    }
                 }
             }
-            catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException) { return (0, null); }
+            catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException) { failed = e; status = 0; d = null; }
+            if (path != "/diag" || status != 200) Log(home, issuer, RequestWords(path, body, status, d, clock.ElapsedMilliseconds, failed));
+            return (status, d);
         }
 
         /// <summary>Set by tests.</summary>

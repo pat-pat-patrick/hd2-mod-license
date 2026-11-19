@@ -67,7 +67,7 @@ namespace Hd2Qd.License
             {
                 var question = new Dictionary<string, object> { ["renew"] = token, ["nonce"] = nonce, ["account"] = account };
                 if (steam != null) question["steam"] = steam;
-                var (status, body) = Post(issuer, "/attest", question);
+                var (status, body) = Post(home, issuer, "/attest", question);
                 if (status == 200)
                 {
                     var got = Json.Str(body, "attest");

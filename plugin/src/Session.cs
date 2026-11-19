@@ -113,18 +113,18 @@ namespace Hd2Qd.License
                         var held = HeldAccount(appData, decl, seg);
                         if (held == null) continue;                 // no resident ciphertext to open
                         var key = SessionKey(home, appData, decl, seg, held);
-                        if (key == null) { SetLastUnlock(path, "no_key"); Log(home, SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
+                        if (key == null) { SetLastUnlock(path, "no_key"); Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
                         if (DecryptPlain(appData, decl, seg, key))
                         {
                             any = true;
                             SetLastUnlock(path, late ? "late" : null);
-                            Log(home, SegLabel(path, seg) + (late ? ": decrypted, but the game started before this program: unlocked from the next game" : ": decrypted for this session") + " (account " + held + ")");
+                            Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + (late ? ": decrypted, but the game started before this program: unlocked from the next game" : ": decrypted for this session") + " (account " + held + ")");
                         }
-                        else Log(home, SegLabel(path, seg) + ": the content did not decrypt to what the receipt signs (sealed)");
+                        else Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": the content did not decrypt to what the receipt signs (sealed)");
                         Array.Clear(key, 0, key.Length);
                     }
                     catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)
-                    { Log(home, SegLabel(path, seg) + ": " + e.GetType().Name); }
+                    { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": " + e.GetType().Name); }
                 }
             return any;
         }
@@ -149,7 +149,7 @@ namespace Hd2Qd.License
             var tokens = BoundAccounts(home, appData, decl).FirstOrDefault(b => b.Account == account).Tokens ?? new List<string>();
             foreach (var token in tokens)
             {
-                var (status, body) = Post(issuer, "/session", new Dictionary<string, object>
+                var (status, body) = Post(home, issuer, "/session", new Dictionary<string, object>
                 { ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token });
                 if (status != 200) continue;              // refused or unreachable: fall back to the cached key within grace
                 var k = Json.Str(body, "key");

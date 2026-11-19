@@ -199,7 +199,7 @@ namespace Hd2Qd.License
             if (what == "payload_pending") what = "pending";
             if (what != null) lastClaim[modFolder] = what == "held" ? "claimed" : what;
             if (Json.Str(r, "why") != "held")
-                Log(home, Path.GetFileName(modFolder.TrimEnd('\\', '/')) + " " + Json.Str(seg, "id") + " " + Json.Str(seg, "version") + ": "
+                Log(home, IssuerOf(modFolder), Path.GetFileName(modFolder.TrimEnd('\\', '/')) + " " + Json.Str(seg, "id") + " " + Json.Str(seg, "version") + ": "
                     + what + (Json.Str(r, "account") is string a ? " (account " + a + ")" : ""));
             return r;
         }
@@ -229,7 +229,7 @@ namespace Hd2Qd.License
                 {
                     var req = new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token };
                     if (sealedV) req["enc"] = 1;
-                    var (status, body) = Post(issuer, "/segments", req);
+                    var (status, body) = Post(home, issuer, "/segments", req);
                     if (status == 409) return Err(Json.Str(body, "error") ?? "payload_pending");
                     if (status == 403) { error = error ?? Json.Str(body, "error") ?? "unknown"; continue; }
                     if (status != 200) return Err("network");
@@ -325,14 +325,18 @@ namespace Hd2Qd.License
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException)
                 {
                     lastClaim[path] = "other";
-                    Log(home, Path.GetFileName(path.TrimEnd('\\', '/')) + ": " + e.GetType().Name + " " + e.Message);
+                    Log(home, IssuerOf(path), Path.GetFileName(path.TrimEnd('\\', '/')) + ": " + e.GetType().Name + " " + e.Message);
                 }
             }
             try
             {
                 List<string> removed;
                 lock (segmentsLock) removed = CleanSegments(appData, library);
-                foreach (var gone in removed) Log(home, "removed " + gone.Substring(LicenseDir(appData).Length).TrimStart('\\'));
+                foreach (var gone in removed)
+                {
+                    var rel = gone.Substring(LicenseDir(appData).Length).TrimStart('\\');
+                    Log(home, rel.Split('\\')[0], "removed " + rel);       // licenses\<issuer>\segments\...
+                }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
             return any;
@@ -371,33 +375,6 @@ namespace Hd2Qd.License
             var held = HeldAccount(appData, decl, seg);
             if (held != null) return "claimed";
             return lastClaim.TryGetValue(modFolder, out var last) && last != "claimed" ? last : "missing";
-        }
-
-        // -- payload.log --------------------------------------------------------------------
-
-        static readonly object logLock = new object();
-        const long LogMax = 256 * 1024;
-
-        /// <summary>The plugin's own log of claims: home\license\payload.log (the previous one kept
-        /// as payload.previous.log past 256 KB). Not the manager's log, not its reports.</summary>
-        public static string LogPath(string home) => Path.Combine(home, "license", "payload.log");
-
-        static void Log(string home, string line)
-        {
-            lock (logLock)
-                try
-                {
-                    var path = LogPath(home);
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    if (File.Exists(path) && new FileInfo(path).Length > LogMax)
-                    {
-                        var prev = Path.Combine(Path.GetDirectoryName(path), "payload.previous.log");
-                        if (File.Exists(prev)) File.Delete(prev);
-                        File.Move(path, prev);
-                    }
-                    File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + line + Environment.NewLine, new UTF8Encoding(false));
-                }
-                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
         }
     }
 }

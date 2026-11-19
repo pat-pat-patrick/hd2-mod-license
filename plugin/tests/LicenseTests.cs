@@ -711,7 +711,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(0, Plugin.Run("license", new string[0], o, Host()));
             Assert.Contains("Test Author (" + issuer.Name + "): not signed in here", o.ToString());
             Assert.Contains("mods: Licensed", o.ToString());
-            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-segments", "license-answer", "license-logout" }, Plugin.Commands.Select(c => c[0]));
+            Assert.Equal(new[] { "license", "license-login", "license-redeem", "license-renew", "license-segments", "license-answer", "license-log-send", "license-logout" }, Plugin.Commands.Select(c => c[0]));
         }
 
         /// <summary>At the manager's start a license half way to its end is renewed.</summary>
@@ -1162,13 +1162,87 @@ namespace Hd2Qd.License.Tests
             issuer.Uploaded.Add("v1.2.0");
             Plugin.ClaimAll(Host());
             Plugin.ClaimAll(Host());                                             // held: not logged again
-            Assert.Equal(Path.Combine(Home, "license", "payload.log"), Plugin.LogPath(Home));
-            var log = File.ReadAllLines(Plugin.LogPath(Home));
+            Assert.Equal(Path.Combine(Home, "license", "license.log"), Plugin.LogPath(Home));
+            var log = File.ReadAllLines(Plugin.LogPath(Home)).Where(l => l.Contains("sealed-mod v1.2.0: ")).ToArray();
             Assert.Equal(2, log.Length);
             Assert.Contains("sealed-mod v1.2.0: pending", log[0]);
             Assert.Contains("sealed-mod v1.2.0: claimed (account " + A + ")", log[1]);
             Assert.False(Directory.Exists(Path.Combine(Home, "reports")));
             Assert.Empty(Directory.GetFiles(Home, "*.log", SearchOption.TopDirectoryOnly));
+        }
+
+        /// <summary>(1.8.0) Every request, sign-in, renewal and change of state is a line of the
+        /// plugin's log, tagged with its issuer; the request says the plugin's version; no
+        /// token goes into the log.</summary>
+        [Fact]
+        public void Requests_sign_ins_and_states_are_logged_without_tokens()
+        {
+            Account(A);
+            var mod = LicensedMod();
+            InLibrary("Licensed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            Plugin.Status(Home, appData, Decl(mod));
+            Plugin.Status(Home, appData, Decl(mod));                             // unchanged: no second line
+            issuer.RenewError = "not_member";
+            Plugin.Renew(Home, appData, Decl(mod), true);
+            var log = File.ReadAllText(Plugin.LogPath(Home));
+            var tag = "[" + issuer.Name + "] ";
+            Assert.Contains(tag + "POST /claim -> 200", log);
+            Assert.Contains(tag + "sign-in: ok, until ", log);
+            Assert.Contains(tag + "POST /renew -> 403 not_member", log);
+            Assert.Contains(tag + "renewal: not_member", log);
+            Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
+            Assert.Contains("license names " + A + ", accounts here " + A, log);
+            Assert.DoesNotContain(issuer.RenewToken, log);
+            Assert.Equal("1.8.0", Plugin.PluginVersion);
+            Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
+        }
+
+        /// <summary>(1.8.0) The card's "Send license log": the head and the lines about that
+        /// author only; the code comes back and is logged; refusals are told apart.</summary>
+        [Fact]
+        public void The_license_log_goes_to_one_author_with_only_their_lines()
+        {
+            Account(A);
+            var mod = LicensedMod();
+            InLibrary("Licensed", mod);
+            Assert.Equal("ok", SignIn(mod));
+            Plugin.Status(Home, appData, Decl(mod));
+            File.AppendAllText(Plugin.LogPath(Home), "2026-11-19 12:00:00 [other.example] sign-in: ok, until x" + Environment.NewLine);
+            File.AppendAllText(Plugin.LogPath(Home), "2026-11-19 12:00:01 removed nothing in particular" + Environment.NewLine);
+            var r = Plugin.SendLog(Home, appData, Decl(mod), "0.22.0");
+            Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
+            Assert.Equal(30L, Json.Long(r, "days"));
+            var sent = issuer.LastDiagLog;
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.8.0\nmanager=0.22.0\n", sent);
+            Assert.Contains("sign-in: ok", sent);
+            Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
+            Assert.DoesNotContain("other.example", sent);
+            Assert.DoesNotContain(issuer.RenewToken, sent);
+            Assert.Contains("sent this log to the author: code K7Q2-M9XA", File.ReadAllText(Plugin.LogPath(Home)));
+            issuer.DiagStatus = 429;
+            Assert.Equal("rate", Json.Str(Plugin.SendLog(Home, appData, Decl(mod)), "error"));
+            issuer.DiagStatus = 404;
+            Assert.Equal("no_diag", Json.Str(Plugin.SendLog(Home, appData, Decl(mod)), "error"));
+            Assert.Equal("test_issuer", Json.Str(Plugin.SendLog(Home, appData, Decl(LicensedMod("T", issuerName: "lic.test"))), "error"));
+            var dead = Decl(LicensedMod("Dead", issuerName: "127.0.0.1:1"));
+            Assert.Equal("network", Json.Str(Plugin.SendLog(Home, appData, dead), "error"));
+            Assert.Contains("[127.0.0.1:1] POST /diag -> unreachable", File.ReadAllText(Plugin.LogPath(Home)));
+        }
+
+        /// <summary>(1.8.0) The 1.6.0/1.7.0 payload.log is the start of license.log.</summary>
+        [Fact]
+        public void The_old_payload_log_carries_on_as_the_license_log()
+        {
+            var dir = Path.Combine(Home, "license");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "payload.log"), "2026-11-18 13:59:30 Super Beacon v0.35.0: claimed" + Environment.NewLine);
+            Account(A);
+            Plugin.Status(Home, appData, Decl(LicensedMod()));
+            Assert.False(File.Exists(Path.Combine(dir, "payload.log")));
+            var log = File.ReadAllLines(Plugin.LogPath(Home));
+            Assert.StartsWith("2026-11-18 13:59:30 Super Beacon", log[0]);
+            Assert.Contains("license: none", log[1]);
         }
 
         /// <summary>The card warns on a manager that ends with its window (before 0.22.0, which
@@ -1274,6 +1348,10 @@ namespace Hd2Qd.License.Tests
             public string SessionError;
             /// <summary>(audit 2026-11-19) /session answers without its signed ticket (an older issuer).</summary>
             public bool SessionNoTicket;
+            /// <summary>(1.8.0) /diag: the log sent, the plugin version the last request said, and
+            /// the status it answers instead (429, 404).</summary>
+            public string LastDiagLog, LastClientHeader;
+            public int DiagStatus = 200;
 
             /// <summary>Marks a version sealed (C1): it gets a content key, and /segments serves it as
             /// ciphertext when the plugin asks with enc.</summary>
@@ -1427,6 +1505,12 @@ namespace Hd2Qd.License.Tests
 
             (int, object) Answer(string path, Dictionary<string, object> body)
             {
+                if (path == "/diag")
+                {
+                    if (DiagStatus != 200) return (DiagStatus, new Dictionary<string, object> { ["error"] = DiagStatus == 429 ? "rate" : "not_found" });
+                    LastDiagLog = Json.Str(body, "log");
+                    return (200, new Dictionary<string, object> { ["code"] = "K7Q2-M9XA", ["days"] = 30L });
+                }
                 if (path == "/attest")
                 {
                     AttestCalls++;
@@ -1551,6 +1635,8 @@ namespace Hd2Qd.License.Tests
                         }
                         var lines = head.ToString().Split(new[] { "\r\n" }, StringSplitOptions.None);
                         var path = lines[0].Split(' ')[1];
+                        var said = lines.FirstOrDefault(l => l.StartsWith("X-HD2QD-License:", StringComparison.OrdinalIgnoreCase));
+                        if (said != null) LastClientHeader = said.Substring(16).Trim();
                         int length = lines.Where(l => l.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                                           .Select(l => int.Parse(l.Substring(15).Trim())).FirstOrDefault();
                         var buf = new byte[length];
