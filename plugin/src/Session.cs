@@ -68,7 +68,12 @@ namespace Hd2Qd.License
                 gameWas = now;
                 // the game already running at this program's first look: it started before the
                 // manager, so what is decrypted now comes too late for this game
-                if (now) OnGameStart(host, first); else OnGameStop(host);
+                if (now) OnGameStart(host, first);
+                else
+                {
+                    OnGameStop(host);
+                    if (!first) Log(Home(host), null, "game stopped: readable member content removed");   // (1.9.0)
+                }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException) { }
             finally { Interlocked.Exchange(ref gameBusy, 0); }
@@ -99,6 +104,7 @@ namespace Hd2Qd.License
         {
             bool any = false;
             string home = Home(host), appData = AppData(host);
+            int sealedCount = 0;
             lock (segmentsLock)
                 foreach (var m in LibraryOf(host))
                 {
@@ -108,10 +114,12 @@ namespace Hd2Qd.License
                     if (seg == null || Json.Str(seg, "error") != null || !Json.Bool(seg, "sealed")) continue;
                     var decl = Declaration(path);
                     if (decl == null || Json.Str(decl, "error") != null) continue;
+                    sealedCount++;
                     try
                     {
                         var held = HeldAccount(appData, decl, seg);
-                        if (held == null) continue;                 // no resident ciphertext to open
+                        // no resident ciphertext to open: said, so a log shows why the mod stayed quiet (1.9.0)
+                        if (held == null) { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": nothing to unlock (no member content downloaded here for an account of this computer)"); continue; }
                         var key = SessionKey(home, appData, decl, seg, held);
                         if (key == null) { SetLastUnlock(path, "no_key"); Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
                         if (DecryptPlain(appData, decl, seg, key))
@@ -126,6 +134,8 @@ namespace Hd2Qd.License
                     catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)
                     { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": " + e.GetType().Name); }
                 }
+            // (1.9.0) every game start, so a log tells a game this program saw from one it never saw
+            Log(home, null, (late ? "the game was already running at this program's start" : "game started") + ": " + sealedCount + " mod(s) with sealed member content in the library");
             return any;
         }
 

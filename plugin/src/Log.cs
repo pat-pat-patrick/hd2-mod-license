@@ -124,12 +124,30 @@ namespace Hd2Qd.License
             List<string> here;
             try { here = Accounts(appData); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { here = new List<string>(); }
-            words += ", accounts here " + (here.Count > 0 ? string.Join(",", here) : "none");
+            words += ", accounts here " + (here.Count > 0 ? string.Join(",", here) : "none (" + SavesWords(appData) + ")");
             if (Json.Long(r, "members") > 1) words += ", " + Json.Long(r, "members") + " members' licenses";
             var key = home + "|" + issuer;
             if (lastState.TryGetValue(key, out var was) && was == words) return;
             lastState[key] = words;
             Log(home, issuer, "license: " + words);
+        }
+
+        /// <summary>(1.9.0) What the saves folder holds when no account was found there: whether
+        /// it exists and the names of its files (up to 12), the Windows user's folder written as
+        /// %APPDATA%. So a log tells a game never started here from names the plugin cannot read.</summary>
+        static string SavesWords(string appData)
+        {
+            var saves = Path.Combine(appData ?? "", "Arrowhead", "Helldivers2", "saves");
+            var shown = @"%APPDATA%\Arrowhead\Helldivers2\saves";
+            try
+            {
+                if (!Directory.Exists(Path.Combine(appData ?? "", "Arrowhead", "Helldivers2"))) return shown + ": no Helldivers2 folder";
+                if (!Directory.Exists(saves)) return shown + ": no such folder";
+                var names = Directory.GetFiles(saves).Select(Path.GetFileName).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+                if (names.Count == 0) return shown + ": empty";
+                return shown + ": " + string.Join(" | ", names.Take(12)) + (names.Count > 12 ? " | (" + (names.Count - 12) + " more)" : "");
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return shown + ": " + e.GetType().Name; }
         }
 
         // -- sending ----------------------------------------------------------------------

@@ -96,10 +96,23 @@ namespace Hd2Qd.License
             var saves = Path.Combine(appData, "Arrowhead", "Helldivers2", "saves");
             if (!Directory.Exists(saves)) return new List<string>();
             return new DirectoryInfo(saves).GetFiles("*_user_settings.config")
-                .Select(f => (Id: f.Name.Substring(0, f.Name.IndexOf('_')).ToLowerInvariant(), f.LastWriteTimeUtc))
+                .Select(f => (Id: AccountOfName(f.Name), f.LastWriteTimeUtc))
                 .Where(a => Account.IsMatch(a.Id))
                 .OrderByDescending(a => a.LastWriteTimeUtc)
                 .Select(a => a.Id).Distinct().ToList();
+        }
+
+        /// <summary>(1.9.0) The account a settings file is named after, as 16 hex digits. The game
+        /// writes the id without its leading zeros (0a1b2c3d4e5f6071 -> a1b2c3d4e5f6071_user_
+        /// settings.config: a player's saves, 2026-11-19; a Steam id, 0110000100..., is always
+        /// saved so by HellForge); Network.peer_id() is padded back to 16 by the mods' own check
+        /// (license_check.lua), so the license must name the padded id. One player in 16 has a
+        /// leading zero and was told there was no game account.</summary>
+        static string AccountOfName(string fileName)
+        {
+            int at = fileName.IndexOf('_');
+            var id = at > 0 ? fileName.Substring(0, at).ToLowerInvariant() : "";
+            return Regex.IsMatch(id, "^[0-9a-f]{1,16}$") ? id.PadLeft(16, '0') : id;
         }
 
         // -- state -------------------------------------------------------------------------

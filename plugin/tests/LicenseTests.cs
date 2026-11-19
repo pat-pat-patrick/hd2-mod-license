@@ -780,6 +780,7 @@ namespace Hd2Qd.License.Tests
         {
             var dir = ClaimedC1(out var mod);
             Assert.True(Plugin.OnGameStart(Host()), "the game start decrypts the ciphertext");
+            Assert.Contains("game started: 1 mod(s) with sealed member content in the library", File.ReadAllText(Plugin.LogPath(Home)));   // (1.9.0)
             for (int i = 1; i <= 8; i++)
             {
                 var lua = Path.Combine(dir, "seg" + i + ".lua");
@@ -1258,6 +1259,39 @@ namespace Hd2Qd.License.Tests
             var mixed = Plugin.Issuers(library)[0].Decl;
             Assert.Equal("mixed", Json.Str(mixed, "via"));
             Assert.DoesNotContain("via=", Url(mixed));
+        }
+
+        /// <summary>(1.9.0) The game names a settings file after the id without its leading zeros
+        /// (a1b2c3d4e5f6071_user_settings.config for 0a1b2c3d4e5f6071, a player's saves
+        /// 2026-11-19): it is that account, padded back to 16 as the mods' check pads peer_id.</summary>
+        [Fact]
+        public void A_settings_file_named_without_leading_zeros_is_the_padded_account()
+        {
+            Account("a1b2c3d4e5f6071");
+            Assert.Equal(new[] { "0a1b2c3d4e5f6071" }, Plugin.Accounts(appData));
+            Account("1a2b3c4d5e6f70");                                          // two zeros dropped
+            Assert.Contains("001a2b3c4d5e6f70", Plugin.Accounts(appData));
+            Account("12345678");                                                // a placeholder once padded: no account
+            Assert.DoesNotContain("0000000012345678", Plugin.Accounts(appData));
+            var url = Json.Str(BeginSignIn(Decl(LicensedMod())), "url");
+            Assert.Contains("&acct=", url);
+        }
+
+        /// <summary>(1.9.0) No account here: the log says what the saves folder holds, with the
+        /// Windows user's folder left out.</summary>
+        [Fact]
+        public void No_account_logs_what_the_saves_folder_holds()
+        {
+            var mod = LicensedMod();
+            Plugin.Status(Home, appData, Decl(mod));
+            Assert.Contains("accounts here none (%APPDATA%\\Arrowhead\\Helldivers2\\saves: no Helldivers2 folder)", File.ReadAllText(Plugin.LogPath(Home)));
+            var saves = Path.Combine(appData, "Arrowhead", "Helldivers2", "saves");
+            Directory.CreateDirectory(saves);
+            File.WriteAllText(Path.Combine(saves, "user_settings.config"), "x");
+            Plugin.Status(Home, appData, Decl(mod));
+            var log = File.ReadAllText(Plugin.LogPath(Home));
+            Assert.Contains("saves: user_settings.config)", log);
+            Assert.DoesNotContain(appData, log);
         }
 
         /// <summary>(1.8.0) The 1.6.0/1.7.0 payload.log is the start of license.log.</summary>

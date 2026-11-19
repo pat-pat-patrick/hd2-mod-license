@@ -130,6 +130,7 @@ namespace Hd2Qd.License
         /// runs to its end); the next start tries again. True when one was renewed.</summary>
         public static bool Start(Dictionary<string, object> host)
         {
+            Interlocked.Exchange(ref startedOnce, 1);
             // (1.5.0) the mods' questions answered from now on (Attest.cs)
             try { Watch(host); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
@@ -145,6 +146,26 @@ namespace Hd2Qd.License
             try { any |= ClaimAll(host); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is System.Security.Cryptography.CryptographicException) { }
             return any;
+        }
+
+        static int startedOnce;
+
+        /// <summary>(1.9.0) What Start sets going, for a plugin added while the window was open:
+        /// the manager calls Start only when its window opens, so a plugin added from the Plugins
+        /// page watched no game until the manager was restarted, and a sealed mod stayed locked
+        /// with no word why (a player's log, 2026-11-19). The card's first drawing starts the
+        /// answers to the mods' questions and the game watch here instead; both are made once.</summary>
+        static void EnsureStarted(Dictionary<string, object> host)
+        {
+            if (host == null || Interlocked.Exchange(ref startedOnce, 1) == 1) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Log(Home(host), null, "started on the Plugins page (added while the manager was open)");
+                try { Watch(host); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
+                try { WatchGame(host); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }
+            });
         }
 
         /// <summary>The commands it adds to the manager's command line.</summary>

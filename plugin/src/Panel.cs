@@ -54,6 +54,7 @@ namespace Hd2Qd.License
         public static FrameworkElement Panel(Window owner, Dictionary<string, object> host)
         {
             string lang = Words.Lang(host);
+            EnsureStarted(host);                 // (1.9.0) added while the window was open
             string home = Home(host), appData = AppData(host);
             var panel = new StackPanel();
             panel.Children.Add(Small(Words.Get(lang, "lic_intro"), new Thickness(0, 8, 0, 0)));
