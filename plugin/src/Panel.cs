@@ -124,14 +124,14 @@ namespace Hd2Qd.License
                     {
                         var path = Json.Str(m, "path");
                         if (path == null || !System.IO.Directory.Exists(path) || Json.Str(Declaration(path), "issuer") != issuer) continue;
-                        var seg = SegmentsOf(path);
-                        if (seg == null) continue;
+                        // (1.10.0) segments, a payload, or both
+                        if (!HasMemberContent(path)) continue;
                         string st;
                         try { st = SegmentsState(home, appData, path); }
                         catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { st = "other"; }
                         var label = Json.Str(m, "name");
                         segmentsMissing |= st != "claimed";
-                        anySealed |= Json.Bool(seg, "sealed");
+                        anySealed |= UnlockedPerSession(path);
                         about.Add(SegmentsWords(st, label, lang));
                     }
                 // a sealed (C1) mod is unlocked only while this program runs when the game starts:
@@ -351,6 +351,8 @@ namespace Hd2Qd.License
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_" + st));
                 case "unsealed":
                     return Words.F(lang, "seg_unsealed", mod);
+                case "update_manager":
+                    return Words.F(lang, "seg_update_manager", mod);
                 case "sign_in_again": case "unknown":
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_sign_in_again"));
                 default: return Words.F(lang, "seg_failed", mod, st);

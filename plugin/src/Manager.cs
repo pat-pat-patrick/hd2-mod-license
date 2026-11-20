@@ -105,7 +105,7 @@ namespace Hd2Qd.License
             {
                 // a sealed (C1) mod held here: a word only when its content was, or will be, left
                 // locked in a game (the user, 2026-11-19: "log and manager only", nothing in game)
-                if (!Json.Bool(SegmentsOf(modFolder), "sealed")) return null;
+                if (!UnlockedPerSession(modFolder)) return null;       // (1.10.0) a payload is unlocked per game too
                 string why = !RunsOnInTray(host) ? "row_needs_window"
                     : LastUnlock(modFolder) == "late" ? "row_unlock_late"
                     : LastUnlock(modFolder) == "no_key" ? "row_unlock_no_key" : null;
@@ -258,13 +258,12 @@ namespace Hd2Qd.License
                     {
                         var path = Json.Str(m, "path");
                         if (path == null || !Directory.Exists(path)) continue;
-                        var seg = SegmentsOf(path);
-                        if (seg == null) continue;
+                        if (!HasMemberContent(path)) continue;          // (1.10.0) segments and/or a payload
                         none = false;
                         var st = SegmentsState(home, appData, path);
                         // the version comes from the Name, so the name nearly always holds it already
                         var name = Json.Str(m, "name") ?? Path.GetFileName(path);
-                        var ver = Json.Str(seg, "version");
+                        var ver = Json.Str(SegmentsOf(path), "version") ?? Json.Str(PayloadOf(path), "version");
                         if (ver != null && name.IndexOf(ver, StringComparison.Ordinal) < 0) name += " " + ver;
                         o.WriteLine(name + ": " + SegmentsCommandWords(st));
                     }
@@ -327,6 +326,7 @@ namespace Hd2Qd.License
                 case "not_signed_in": return "sign in first (license-login)";
                 case "no_version": return "no vX.Y.Z in the mod's manifest.json Name";
                 case "bad_receipt": return "the content received is not signed by the key the mod declares";
+                case "update_manager": return "this mod needs a newer Member licenses plugin";
                 default: return CommandError(st);
             }
         }

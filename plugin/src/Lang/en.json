@@ -54,6 +54,7 @@
   "seg_no_version": "{0}: the version cannot be read from the mod's manifest.json",
   "seg_failed": "{0}: the member content could not be downloaded. {1}",
   "seg_needs_tray": "Member content is unlocked only while this program runs when the game starts. This version of HD2 Mod Quick Deploy ends when its window closes: update it to 0.22.0 or later, which keeps running in the notification area.",
+  "seg_update_manager": "{0}: this mod needs a newer Member licenses plugin; update it on the Plugins page.",
   "seg_unsealed": "{0}: member content is no longer handed out for this version; update the mod to its latest version.",
   "seg_claim": "Request again",
   "lic_err_bad_receipt": "The content received is not signed by the key the mod declares.",

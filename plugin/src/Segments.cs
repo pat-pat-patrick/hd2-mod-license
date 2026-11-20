@@ -227,7 +227,10 @@ namespace Hd2Qd.License
             foreach (var (account, tokens) in bound)
                 foreach (var token in tokens)
                 {
-                    var req = new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token };
+                    // (1.10.0) payload: this plugin also fetches a mod's payload, so the issuer may hand it
+                    // the segments of a mod whose data comes that way (a plugin without it would run the
+                    // logic with nothing to play, and is told to update instead)
+                    var req = new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["account"] = account, ["renew"] = token, ["payload"] = 1 };
                     if (sealedV) req["enc"] = 1;
                     var (status, body) = Post(home, issuer, "/segments", req);
                     if (status == 409) return Err(Json.Str(body, "error") ?? "payload_pending");
@@ -339,8 +342,17 @@ namespace Hd2Qd.License
                 }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+            // (1.10.0) and the payloads (Payload.cs)
+            any |= ClaimAllPayloads(host, force);
             return any;
         }
+
+        /// <summary>(1.10.0) Whether a mod ships member content: segments, a payload, or both.</summary>
+        public static bool HasMemberContent(string modFolder) => SegmentsOf(modFolder) != null || PayloadOf(modFolder) != null;
+
+        /// <summary>(1.10.0) Whether a mod's member content is unlocked per game session (sealed
+        /// segments, or any payload): it then needs this program running when the game starts.</summary>
+        public static bool UnlockedPerSession(string modFolder) => Json.Bool(SegmentsOf(modFolder), "sealed") || PayloadOf(modFolder) != null;
 
         // -- in the background, once per version ---------------------------------------------
 
@@ -367,6 +379,17 @@ namespace Hd2Qd.License
         /// <summary>What the row and the card say about a mod's segments: "claimed", "pending",
         /// "not_signed_in", "missing" (not claimed yet), or the last claim's error.</summary>
         public static string SegmentsState(string home, string appData, string modFolder)
+        {
+            // (1.10.0) a mod's member content is its segments and its payload: "claimed" only when
+            // every part it declares is held here, else what the first missing part says
+            var segState = SegmentsOnlyState(appData, modFolder);
+            var payState = PayloadState(home, appData, modFolder);
+            if (segState == null) return payState;
+            if (payState == null || segState != "claimed") return segState;
+            return payState;
+        }
+
+        static string SegmentsOnlyState(string appData, string modFolder)
         {
             var decl = Declaration(modFolder);
             var seg = SegmentsOf(modFolder);

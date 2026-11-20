@@ -134,6 +134,14 @@ namespace Hd2Qd.License
                     catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)
                     { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": " + e.GetType().Name); }
                 }
+            // (1.10.0) the payloads: a mod with both is counted once
+            lock (segmentsLock)
+            {
+                var (payAny, _) = UnlockPayloads(host, late);
+                any |= payAny;
+                sealedCount += LibraryOf(host).Count(m => Json.Str(m, "path") is string p && Directory.Exists(p)
+                    && PayloadOf(p) is Dictionary<string, object> pay && Json.Str(pay, "error") == null && !Json.Bool(SegmentsOf(p), "sealed"));
+            }
             // (1.9.0) every game start, so a log tells a game this program saw from one it never saw
             Log(home, null, (late ? "the game was already running at this program's start" : "game started") + ": " + sealedCount + " mod(s) with sealed member content in the library");
             return any;
@@ -143,7 +151,11 @@ namespace Hd2Qd.License
         /// sealed version here is removed, leaving the ciphertext, the receipt and the key cache.</summary>
         public static void OnGameStop(Dictionary<string, object> host)
         {
-            lock (segmentsLock) ClearAllPlain(Home(host), AppData(host));
+            lock (segmentsLock)
+            {
+                ClearAllPlain(Home(host), AppData(host));
+                ClearPayloadPlain(AppData(host));       // (1.10.0)
+            }
         }
 
         static string SegLabel(string path, Dictionary<string, object> seg) =>
