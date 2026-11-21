@@ -2,7 +2,7 @@
 
 Membership licenses for Helldivers 2 Lua mods. A player signs in to the mod author's own issuer from HD2 Mod Quick Deploy and receives a signed license; the mod checks it when it loads. A mod may also ask, once each game, whether the membership is still active (the online check): the manager carries the question to the issuer and the signed answer back. The game itself never goes over the network for it.
 
-**Status: protocol draft 1 (2026-11-02); static-resource extension draft 3 (2026-11-21); plugin 1.11.3 (requests retried, 2026-11-21).** The specification is written in Chinese; an English translation will follow.
+**Status: protocol draft 1 (2026-11-02); static-resource extension draft 3 (2026-11-21); plugin 1.11.4 (download progress, 2026-11-21).** The specification is written in Chinese; an English translation will follow.
 
 ## How it works
 

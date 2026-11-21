@@ -202,7 +202,8 @@ namespace Hd2Qd.License
         public static Dictionary<string, object> ClaimPayload(string home, string appData, string modFolder, bool force = false)
         {
             Dictionary<string, object> r;
-            lock (segmentsLock) r = ClaimPayloadOne(home, appData, modFolder, force);
+            try { lock (segmentsLock) r = ClaimPayloadOne(home, appData, modFolder, force); }
+            finally { percent.TryRemove(modFolder, out _); }
             var pay = PayloadOf(modFolder);
             string what = Json.Str(r, "error") ?? (Json.Bool(r, "claimed") ? "claimed" : Json.Str(r, "why"));
             if (what == "payload_pending") what = "pending";
@@ -232,7 +233,7 @@ namespace Hd2Qd.License
             foreach (var (account, tokens) in bound)
                 foreach (var token in tokens)
                 {
-                    var got = FetchPayload(home, decl, pay, account, token, true);
+                    var got = FetchPayload(home, decl, pay, account, token, true, f => Progress(modFolder, f));
                     if (got.Error == "payload_pending" || got.Error == "network") return Err(got.Error);
                     if (got.Error != null) { error = error ?? got.Error; continue; }
                     WritePayload(appData, Json.Str(decl, "issuer"), pay, got.Sealed, got.Receipt, PartsOf(got.Fields));
@@ -241,6 +242,26 @@ namespace Hd2Qd.License
                     return new Dictionary<string, object> { ["claimed"] = true, ["account"] = account };
                 }
             return Err(error ?? "unknown");
+        }
+
+        /// <summary>(1.11.4) How far each mod's member content download is, 0-99, while it runs
+        /// (the user, 2026-11-21: players took a download in progress for one that had stopped).
+        /// Parts are of about one size, so a part counts as an equal share.</summary>
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> percent =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The download's percentage for a mod folder, or null when none is running.</summary>
+        public static int? PercentOf(string modFolder) => percent.TryGetValue(modFolder, out var p) ? p : (int?)null;
+
+        static void Progress(string modFolder, double done)
+        {
+            int p = Math.Max(0, Math.Min(99, (int)(done * 100)));
+            int old = percent.TryGetValue(modFolder, out var o) ? o : -1;
+            if (p == old) return;
+            percent[modFolder] = p;
+            // the card's line follows by itself (Panel's live lines); the mod's row only when the
+            // window is drawn, which reads the whole state: so at 25, 50 and 75 % only
+            if (old >= 0 && p / 25 > old / 25) RedrawWindow();
         }
 
         sealed class Fetched
@@ -257,7 +278,8 @@ namespace Hd2Qd.License
         /// issuer's refusal, "payload_pending", "network", "bad_receipt". (1.11.0) The request says
         /// parts=1: this plugin puts a fingerprinted payload's parts together (an older one is told
         /// to update); the answer then lists the parts, {url, hash} each, instead of one url.</summary>
-        static Fetched FetchPayload(string home, Dictionary<string, object> decl, Dictionary<string, object> pay, string account, string token, bool download)
+        static Fetched FetchPayload(string home, Dictionary<string, object> decl, Dictionary<string, object> pay, string account, string token, bool download,
+                                    Action<double> progress = null)
         {
             string issuer = Json.Str(decl, "issuer"), wire = Json.Str(pay, "wire");
             var (status, body) = Post(home, issuer, "/payload", new Dictionary<string, object> { ["id"] = wire, ["account"] = account, ["renew"] = token, ["parts"] = 1 });
@@ -305,7 +327,8 @@ namespace Hd2Qd.License
                     var (url, hash) = links[i];
                     // the link comes from the issuer itself (same scheme and host), never another site
                     if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
-                    try { bytes = GetBytes(home, issuer, url); break; }
+                    int at = i, of = links.Count;
+                    try { bytes = GetBytes(home, issuer, url, part => progress?.Invoke((at + part) / of)); break; }
                     catch (LinkExpired)
                     {
                         if (fresh++ >= 2) return new Fetched { Error = "network" };
@@ -361,7 +384,7 @@ namespace Hd2Qd.License
         /// <summary>The sealed bytes from the issuer's short-lived link (null on a non-200 other than
         /// 403, which throws LinkExpired). No byte for StallMs, while waiting for the answer or
         /// during it, throws IOException: the caller starts it again.</summary>
-        static byte[] GetBytes(string home, string issuer, string url)
+        static byte[] GetBytes(string home, string issuer, string url, Action<double> progress = null)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             using (var request = new HttpRequestMessage(HttpMethod.Get, url))
@@ -394,6 +417,8 @@ namespace Hd2Qd.License
                         while ((n = ReadOrStall(s, buf, r, ms.Length)) > 0)
                         {
                             ms.Write(buf, 0, n);
+                            // (1.11.4) how far this part is, by the length the answer gave
+                            if (r.Content.Headers.ContentLength is long whole && whole > 0) progress?.Invoke(Math.Min(1.0, ms.Length / (double)whole));
                             if (ms.Length > PayloadMax) throw new InvalidDataException("larger than " + PayloadMax + " bytes");
                         }
                         Log(home, issuer, "GET /payload/blob -> 200, " + ms.Length + " bytes in " + clock.ElapsedMilliseconds + " ms");

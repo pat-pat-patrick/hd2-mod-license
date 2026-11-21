@@ -1110,6 +1110,35 @@ namespace Hd2Qd.License.Tests
             Assert.True(note == null || Json.Str(note, "text") != "Downloading member content…");
         }
 
+        /// <summary>(1.11.4) A download says how far it is, on the mod's row too, and the window is
+        /// redrawn at 25, 50 and 75 % (not at every percent: a redraw reads the whole state).</summary>
+        [Fact]
+        public void A_download_says_its_percentage_and_ends_without_one()
+        {
+            Account(A);
+            var mod = PayloadMod();
+            var texts = PartTexts(4, 2);
+            issuer.Payloads.Remove("callouts.v0.12.0");
+            issuer.PublishParts("callouts.v0.12.0", texts);
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            var seen = new List<int?>();
+            var rows = new List<string>();
+            var host = Host();
+            issuer.OnBlob = () => { seen.Add(Plugin.PercentOf(mod)); rows.Add(Json.Str(Plugin.ModNote(mod, host), "text")); };
+            int redraws = 0;
+            host["refresh"] = (Action)(() => redraws++);
+            Assert.True(Plugin.ClaimAll(host));
+            // at the start of each of the 4 parts: none yet, then a quarter more each time
+            Assert.Equal(4, seen.Count);
+            Assert.True(seen[0] == null || seen[0] == 0, "first part: " + seen[0]);
+            Assert.Equal(new int?[] { 25, 50, 75 }, seen.Skip(1).ToArray());
+            Assert.Equal("Downloading member content (50%)", rows[2]);
+            Assert.Null(Plugin.PercentOf(mod));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(redraws >= 2 && redraws <= 5, "start, end, and at most 25/50/75 (" + redraws + ")");
+        }
+
         [Fact]
         public void A_version_still_to_be_published_is_asked_for_again_until_it_is_there()
         {
@@ -1614,7 +1643,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.3", Plugin.PluginVersion);
+            Assert.Equal("1.11.4", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1634,7 +1663,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.3\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.4\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along

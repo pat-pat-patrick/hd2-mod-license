@@ -99,7 +99,7 @@ namespace Hd2Qd.License
                         Refresh(host);
                     }));
                 // (1.6.0) the member content of this author's mods that ship it per game account
-                bool segmentsMissing = false, anySealed = false;
+                bool segmentsMissing = false, anySealed = false, anyContent = false;
                 if (state == "licensed")
                     foreach (var m in LibraryOf(host))
                     {
@@ -113,8 +113,14 @@ namespace Hd2Qd.License
                         var label = Json.Str(m, "name");
                         segmentsMissing |= st != "claimed" && st != "downloading";     // (1.11.1) no button while it downloads
                         anySealed |= UnlockedPerSession(path);
-                        about.Add(SegmentsWords(st, label, lang));
+                        anyContent = true;
+                        // (1.11.4) a download in progress says how far it is, and keeps saying it
+                        if (st == "downloading") card.Live[about.Count] = (path, label, lang);
+                        about.Add(st == "downloading" ? DownloadingWords(path, label, lang) : SegmentsWords(st, label, lang));
                     }
+                // (1.11.4) players looked in the mod's folder, found no member content there and took
+                // the download for a failure (the user, 2026-11-21): where it is, said once
+                if (anyContent) about.Add(Words.Get(lang, "seg_where"));
                 // a sealed (C1) mod is unlocked only while this program runs when the game starts:
                 // a manager older than 0.22.0 ends when its window closes, and then the mod does
                 // nothing in that game with no word why (2026-11-19)
@@ -141,13 +147,63 @@ namespace Hd2Qd.License
             public List<string> About = new List<string>();
             public readonly List<(string Label, bool Primary, bool Enabled, Action Click)> Buttons = new List<(string, bool, bool, Action)>();
             public readonly List<(string Label, Action Click)> Links = new List<(string, Action)>();
+            /// <summary>(1.11.4) About lines that follow a running download: index -> mod folder, name, language.</summary>
+            public readonly Dictionary<int, (string Path, string Label, string Lang)> Live = new Dictionary<int, (string, string, string)>();
+        }
+
+        /// <summary>(1.11.4) A download in words: with its percentage once one is known.</summary>
+        static string DownloadingWords(string path, string label, string lang) =>
+            PercentOf(path) is int p ? Words.F(lang, "seg_downloading_pct", label, p) : Words.F(lang, "seg_downloading", label);
+
+        // (1.11.4) the card's lines of running downloads, brought up to date twice a second in place:
+        // the window's own redraw reads the whole library state, too much to repeat while it downloads
+        static System.Windows.Threading.DispatcherTimer liveTimer;
+        static readonly List<(WeakReference<TextBlock> Line, string Path, string Label, string Lang)> live =
+            new List<(WeakReference<TextBlock>, string, string, string)>();
+
+        static void FollowDownload(TextBlock line, string path, string label, string lang)
+        {
+            live.RemoveAll(x => !x.Line.TryGetTarget(out _));
+            live.Add((new WeakReference<TextBlock>(line), path, label, lang));
+            if (liveTimer == null)
+            {
+                liveTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                liveTimer.Tick += (s, e) =>
+                {
+                    bool any = false;
+                    foreach (var (weak, path2, label2, lang2) in live.ToList())
+                    {
+                        if (!weak.TryGetTarget(out var tb) || !downloading.ContainsKey(path2)) continue;
+                        any = true;
+                        var words = DownloadingWords(path2, label2, lang2);
+                        if (tb.Text != words) tb.Text = words;
+                    }
+                    if (!any) { liveTimer.Stop(); live.Clear(); }
+                };
+            }
+            liveTimer.Start();
+        }
+
+        /// <summary>(1.11.4) The manager's window drawn again, from any thread (its refresh, kept
+        /// from the last host that had one).</summary>
+        static void RedrawWindow()
+        {
+            var refresh = lastRefresh;
+            if (refresh == null) return;
+            var d = Application.Current?.Dispatcher;
+            if (d != null) d.BeginInvoke(refresh); else refresh();
         }
 
         internal static FrameworkElement AuthorBlock(Card card)
         {
             var block = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
             block.Children.Add(card.State);
-            foreach (var words in card.About) block.Children.Add(Small(words, new Thickness(20, 4, 0, 0)));
+            for (int i = 0; i < card.About.Count; i++)
+            {
+                var small = Small(card.About[i], new Thickness(20, 4, 0, 0));
+                if (card.Live.TryGetValue(i, out var follow)) FollowDownload(small, follow.Path, follow.Label, follow.Lang);
+                block.Children.Add(small);
+            }
             if (card.Buttons.Count > 0)
             {
                 var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 0, 0) };

@@ -119,8 +119,10 @@ namespace Hd2Qd.License
             if (seg == "missing") ClaimLater(host, modFolder, SegmentsOf(modFolder));
             return new Dictionary<string, object>
             {
-                ["text"] = Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending"
-                                           : seg == "downloading" ? "row_segments_downloading" : "row_segments"),
+                // (1.11.4) a download says how far it is (redrawn at 25, 50, 75 %)
+                ["text"] = seg == "downloading" && PercentOf(modFolder) is int pct ? Words.F(lang, "row_segments_downloading_pct", pct)
+                    : Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending"
+                                      : seg == "downloading" ? "row_segments_downloading" : "row_segments"),
                 ["tip"] = Words.Get(lang, "row_segments_tip"),
                 ["colour"] = "Yellow",
             };
