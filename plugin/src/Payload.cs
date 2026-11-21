@@ -297,12 +297,22 @@ namespace Hd2Qd.License
             {
                 // the link comes from the issuer itself (same scheme and host), never another site
                 if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
-                byte[] bytes;
-                try { bytes = GetBytes(home, issuer, url); }
-                catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException || e is InvalidDataException)
+                byte[] bytes = null;
+                // (1.11.3) a download cut off is started again, twice, as Post retries a request
+                for (int attempt = 0; ; attempt++)
                 {
-                    Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
-                    return new Fetched { Error = "network" };
+                    try { bytes = GetBytes(home, issuer, url); break; }
+                    catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException)
+                    {
+                        Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
+                        if (attempt >= RetryDelaysMs.Length) return new Fetched { Error = "network" };
+                        if (RetryDelaysMs[attempt] > 0) System.Threading.Thread.Sleep(RetryDelaysMs[attempt]);
+                    }
+                    catch (InvalidDataException e)
+                    {
+                        Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
+                        return new Fetched { Error = "network" };
+                    }
                 }
                 if (bytes == null) return new Fetched { Error = "network" };
                 if (Sha256Bytes(bytes) != hash) return new Fetched { Error = "bad_receipt" };

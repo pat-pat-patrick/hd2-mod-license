@@ -75,48 +75,29 @@ namespace Hd2Qd.License
                                 busy ? "Blue" : state == "licensed" ? "Blue" : "Yellow",
                                 Json.Str(decl, "name") + " · " + issuer + " · " +
                                 (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")));
-                var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 0, 0) };
                 var about = new List<string>();
-                if (busy)
+                // (1.11.3) the buttons: what this state needs done, nothing more (1.11.2 showed up to
+                // five in a row: sign in again, code, sign out, fetch again, send log; the user,
+                // 2026-11-21: "这好几个按钮有点乱"). The rest are quiet links underneath.
+                var card = new Card();
+                bool canSignIn = state != "no_account" && state != "key_changed" && signingIn == null;
+                bool site = !TestIssuer(issuer);           // a test build's issuer has no site: nothing that can only fail
+                if (busy) card.Buttons.Add((Words.Get(lang, "cancel"), false, true, () => wait?.Cancel()));
+                else if (site && state != "licensed")
                 {
-                    var cancel = new Button { Content = Words.Get(lang, "cancel"), Style = Style("Ghost"), MinHeight = 36 };
-                    cancel.Click += (s, e) => wait?.Cancel();
-                    buttons.Children.Add(cancel);
+                    card.Buttons.Add((Words.Get(lang, state == "expired" ? "lic_sign_in_again" : "lic_sign_in"), true, canSignIn, () => SignIn(decl, host)));
+                    card.Buttons.Add((Words.Get(lang, "lic_redeem"), false, canSignIn, () => RedeemCode(owner, decl, host)));
                 }
-                else
-                {
-                    bool canSignIn = state != "no_account" && state != "key_changed";
-                    // a test build's issuer has no site: no button that can only fail
-                    if (!TestIssuer(issuer))
+                if (!busy && site && state == "licensed" && canSignIn)
+                    card.Links.Add((Words.Get(lang, "lic_switch_member"), () => SignIn(decl, host)));
+                if (!busy && state != "none" && state != "no_account" && state != "test_issuer")
+                    card.Links.Add((Words.Get(lang, "lic_sign_out"), () =>
                     {
-                        var signIn = new Button
-                        {
-                            Content = Words.Get(lang, state == "licensed" || state == "expired" ? "lic_sign_in_again" : "lic_sign_in"),
-                            Style = Style(state == "licensed" ? "Ghost" : "Primary"), MinHeight = 36, IsEnabled = canSignIn && signingIn == null,
-                        };
-                        signIn.Click += (s, e) => SignIn(decl, host);
-                        buttons.Children.Add(signIn);
-                        var redeem = new Button
-                        {
-                            Content = Words.Get(lang, "lic_redeem"), Style = Style("Ghost"), MinHeight = 36,
-                            Margin = new Thickness(8, 0, 0, 0), IsEnabled = canSignIn && signingIn == null,
-                        };
-                        redeem.Click += (s, e) => RedeemCode(owner, decl, host);
-                        buttons.Children.Add(redeem);
-                    }
-                    if (state != "none" && state != "no_account" && state != "test_issuer")
-                    {
-                        var signOut = new Button { Content = Words.Get(lang, "lic_sign_out"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
-                        signOut.Click += (s, e) =>
-                        {
-                            if (!Ask(host, Words.Get(lang, "lic_sign_out_ask"), Words.Get(lang, "lic_sign_out"))) return;
-                            try { Forget(home, appData, issuer); }
-                            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); }
-                            Refresh(host);
-                        };
-                        buttons.Children.Add(signOut);
-                    }
-                }
+                        if (!Ask(host, Words.Get(lang, "lic_sign_out_ask"), Words.Get(lang, "lic_sign_out"))) return;
+                        try { Forget(home, appData, issuer); }
+                        catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { Tell(host, Words.F(lang, "failed", x.Message)); }
+                        Refresh(host);
+                    }));
                 // (1.6.0) the member content of this author's mods that ship it per game account
                 bool segmentsMissing = false, anySealed = false;
                 if (state == "licensed")
@@ -139,26 +120,64 @@ namespace Hd2Qd.License
                 // nothing in that game with no word why (2026-11-19)
                 if (anySealed && !RunsOnInTray(host)) about.Add(Words.Get(lang, "seg_needs_tray"));
                 if (segmentsMissing && !busy && signingIn == null)
-                {
-                    var again = new Button { Content = Words.Get(lang, "seg_claim"), Style = Style("Ghost"), MinHeight = 36, Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
-                    again.Click += (s, e) => ClaimNow(host, false);
-                    buttons.Children.Add(again);
-                }
-                // (1.8.0) the log of this author's sign-ins, renewals and claims, to the author
-                if (!busy && !TestIssuer(issuer))
-                {
-                    var send = new Button { Content = Words.Get(lang, "lic_send_log"), Style = Style("Ghost"), MinHeight = 36,
-                                            Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0), IsEnabled = signingIn == null && sendingLog == null };
-                    send.Click += (s, e) => SendLogNow(decl, host);
-                    buttons.Children.Add(send);
-                }
-                var block = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
-                block.Children.Add(line);
-                foreach (var words in about) block.Children.Add(Small(words, new Thickness(20, 4, 0, 0)));
-                block.Children.Add(buttons);
-                panel.Children.Add(block);
+                    card.Buttons.Add((Words.Get(lang, "seg_claim"), true, true, () => ClaimNow(host, false)));
+                // (1.8.0) the log of this author's sign-ins, renewals and claims, to the author; (1.11.3)
+                // a link that says it is for a problem: players took its number for a step of signing in
+                if (!busy && site && signingIn == null && sendingLog == null)
+                    card.Links.Add((Words.Get(lang, "lic_send_log"), () => SendLogNow(decl, host)));
+                card.State = line;
+                card.About = about;
+                panel.Children.Add(AuthorBlock(card));
             }
             return panel;
+        }
+
+        /// <summary>(1.11.3) One author on the card: the state line, what it says about each mod,
+        /// the buttons this state needs, then the quiet links (switch member, sign out, report a
+        /// problem) in one muted line.</summary>
+        internal sealed class Card
+        {
+            public UIElement State;
+            public List<string> About = new List<string>();
+            public readonly List<(string Label, bool Primary, bool Enabled, Action Click)> Buttons = new List<(string, bool, bool, Action)>();
+            public readonly List<(string Label, Action Click)> Links = new List<(string, Action)>();
+        }
+
+        internal static FrameworkElement AuthorBlock(Card card)
+        {
+            var block = new StackPanel { Margin = new Thickness(0, 8, 0, 0) };
+            block.Children.Add(card.State);
+            foreach (var words in card.About) block.Children.Add(Small(words, new Thickness(20, 4, 0, 0)));
+            if (card.Buttons.Count > 0)
+            {
+                var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(20, 10, 0, 0) };
+                foreach (var (label, primary, enabled, click) in card.Buttons)
+                {
+                    var b = new Button { Content = label, Style = Style(primary ? "Primary" : "Ghost"), MinHeight = 36, IsEnabled = enabled,
+                                         Margin = new Thickness(buttons.Children.Count > 0 ? 8 : 0, 0, 0, 0) };
+                    b.Click += (s, e) => click();
+                    buttons.Children.Add(b);
+                }
+                block.Children.Add(buttons);
+            }
+            if (card.Links.Count > 0)
+            {
+                var links = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, card.Buttons.Count > 0 ? 8 : 6, 0, 0) };
+                foreach (var (label, click) in card.Links)
+                {
+                    if (links.Inlines.Count > 0) links.Inlines.Add(new System.Windows.Documents.Run("   ·   ") { Foreground = Brush("Muted") });
+                    var link = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(label))
+                    {
+                        Foreground = Brush("Blue"), TextDecorations = null, Cursor = System.Windows.Input.Cursors.Hand,
+                    };
+                    link.MouseEnter += (s, e) => link.TextDecorations = TextDecorations.Underline;
+                    link.MouseLeave += (s, e) => link.TextDecorations = null;
+                    link.Click += (s, e) => click();
+                    links.Inlines.Add(link);
+                }
+                block.Children.Add(links);
+            }
+            return block;
         }
 
         /// <summary>Whether the manager hosting this plugin keeps running in the notification area

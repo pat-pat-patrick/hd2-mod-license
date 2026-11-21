@@ -33,6 +33,7 @@ namespace Hd2Qd.License.Tests
             keys = (Dictionary<string, object>)Json.Parse(File.ReadAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test_keys.json")));
             issuer = new Issuer(this);
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            Plugin.RetryDelaysMs = new[] { 0, 0 };      // (1.11.3) retries without the pauses
         }
 
         public void Dispose()
@@ -317,6 +318,41 @@ namespace Hd2Qd.License.Tests
             issuer.Dispose();                              // but the issuer cannot be reached to collect it
             var r = FinishSignIn(Decl(mod), Json.Str(begin, "session"), TimeSpan.FromSeconds(5), CancellationToken.None);
             Assert.Equal("network", Json.Str(r, "error"));
+        }
+
+        /// <summary>(1.11.3) A lost request is sent again, twice; a refusal is not.</summary>
+        [Fact]
+        public void A_lost_request_is_sent_again_and_a_refusal_is_not()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            issuer.DropNext = 2;                           // two connections closed with no answer
+            Assert.Null(Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            Assert.Equal(2, issuer.Dropped);
+            Assert.Equal(1, issuer.RedeemCalls);
+
+            issuer.Edge503Next = 1;                        // an edge error, then the answer
+            Assert.Null(Json.Str(Renew(Decl(mod), true), "error"));
+            Assert.Equal(1, issuer.RenewCalls);
+
+            issuer.DropNext = 3;                           // three lost: given up after the third try
+            Assert.Equal("network", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            Assert.Equal(1, issuer.RedeemCalls);
+            Assert.Equal(0, issuer.DropNext);
+
+            issuer.RedeemError = "not_member";             // a refusal is the answer: asked once
+            Assert.Equal("not_member", Json.Str(Plugin.Redeem(Home, appData, Decl(mod), issuer.KnownCode), "error"));
+            Assert.Equal(2, issuer.RedeemCalls);
+        }
+
+        [Fact]
+        public void A_sign_in_whose_claim_is_lost_once_still_finishes()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            issuer.DropNext = 1;
+            Assert.Equal("ok", SignIn(mod));
+            Assert.Equal(1, issuer.Dropped);
         }
 
         [Fact]
@@ -830,6 +866,20 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("bad_receipt", Plugin.SegmentsState(Home, appData, mod));
             Assert.False(Directory.Exists(PayDir()), "nothing is written for " + spoil);
             if (spoil == "url") Assert.Equal(0, issuer.BlobCalls);                  // never fetched from another host
+        }
+
+        [Fact]
+        public void A_download_cut_off_is_started_again()
+        {
+            Account(A);
+            var mod = PayloadMod();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.DropBlobNext = 2;
+            Assert.True(Plugin.ClaimAll(Host()));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.Equal(1, issuer.BlobCalls);
+            Assert.Equal(2, issuer.Dropped);
         }
 
         [Fact]
@@ -1521,7 +1571,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.2", Plugin.PluginVersion);
+            Assert.Equal("1.11.3", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1541,7 +1591,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.2\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.3\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1753,6 +1803,10 @@ namespace Hd2Qd.License.Tests
             public Action OnBlob;
             public long PayloadGrace = 20 * 86400;
             public bool LastSegmentsPayload;
+            /// <summary>(1.11.3) A network that loses requests: the next N requests are read and the
+            /// connection closed with no answer, the next N answered 503 (an edge error), and the next
+            /// N blob downloads cut off.</summary>
+            public int DropNext, Edge503Next, DropBlobNext, Dropped;
 
             /// <summary>Seals plaintext as the offline tool does (AES-256-CBC/PKCS7, IV ‖ ciphertext)
             /// under a fresh key and mark, and serves it for the wire id from now on.</summary>
@@ -2146,6 +2200,15 @@ namespace Hd2Qd.License.Tests
                                           .Select(l => int.Parse(l.Substring(15).Trim())).FirstOrDefault();
                         var buf = new byte[length];
                         for (int got = 0; got < length;) got += s.Read(buf, got, length - got);
+                        if (path.StartsWith("/payload/blob?") && DropBlobNext > 0) { DropBlobNext--; Dropped++; continue; }
+                        if (!path.StartsWith("/payload/blob?") && DropNext > 0) { DropNext--; Dropped++; continue; }
+                        if (!path.StartsWith("/payload/blob?") && Edge503Next > 0)
+                        {
+                            Edge503Next--; Dropped++;
+                            var busy = Encoding.ASCII.GetBytes("HTTP/1.1 503 X\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy");
+                            s.Write(busy, 0, busy.Length);
+                            continue;
+                        }
                         if (path.StartsWith("/payload/blob?"))
                         {
                             // (1.10.0) the sealed bytes, by mark, as R2 streams them

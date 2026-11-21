@@ -566,6 +566,29 @@ namespace Hd2Qd.License
         /// version to the issuer (header X-HD2QD-License), whose own request log shows it.</summary>
         static (int, Dictionary<string, object>) Post(string home, string issuer, string path, Dictionary<string, object> body)
         {
+            // (1.11.3) a request that does not get through is sent again, twice, after a pause: a
+            // network that drops some connections (mainland China to Cloudflare, 2026-11-21: three
+            // sign-ins lost at 20 s, the fourth answered in 3.8 s) then needs no click. Only an
+            // unreachable issuer or an edge error (502-504, Cloudflare's 520-524) is retried, never a
+            // refusal. Safe for every path: /renew, /segments, /payload, /session and /attest change
+            // nothing; /redeem with the same code signs again; a /claim whose first answer was lost
+            // finds its one-use code spent and says "sign in again", as a new sign-in would need anyway.
+            var (status, d) = PostOnce(home, issuer, path, body);
+            for (int i = 0; i < RetryDelaysMs.Length && Retryable(status); i++)
+            {
+                if (RetryDelaysMs[i] > 0) System.Threading.Thread.Sleep(RetryDelaysMs[i]);
+                (status, d) = PostOnce(home, issuer, path, body);
+            }
+            return (status, d);
+        }
+
+        /// <summary>(1.11.3) The pauses before each retry, in milliseconds; tests set them to 0.</summary>
+        public static int[] RetryDelaysMs = { 2000, 5000 };
+
+        static bool Retryable(int status) => status == 0 || status == 502 || status == 503 || status == 504 || (status >= 520 && status <= 524);
+
+        static (int, Dictionary<string, object>) PostOnce(string home, string issuer, string path, Dictionary<string, object> body)
+        {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             int status = 0;
             Dictionary<string, object> d = null;
