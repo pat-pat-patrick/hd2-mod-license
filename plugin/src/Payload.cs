@@ -293,15 +293,29 @@ namespace Hd2Qd.License
             if (!download) return got;
 
             var pieces = new List<byte[]>();
-            foreach (var (url, hash) in links)
+            int fresh = 0;
+            for (int i = 0; i < links.Count; i++)
             {
-                // the link comes from the issuer itself (same scheme and host), never another site
-                if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
                 byte[] bytes = null;
-                // (1.11.3) a download cut off is started again, twice, as Post retries a request
+                // (1.11.3) a download cut off or stalled is started again, twice, as Post retries a
+                // request; a link that ran out (the issuer's links last 10 minutes, all handed out at
+                // once, and a slow line did not get through 20 MB in that time) is asked for again
                 for (int attempt = 0; ; attempt++)
                 {
+                    var (url, hash) = links[i];
+                    // the link comes from the issuer itself (same scheme and host), never another site
+                    if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
                     try { bytes = GetBytes(home, issuer, url); break; }
+                    catch (LinkExpired)
+                    {
+                        if (fresh++ >= 2) return new Fetched { Error = "network" };
+                        var again = FreshLinks(home, issuer, wire, account, token, parts);
+                        // the same parts of the same signed receipt, only new links: else nothing
+                        if (again == null || again.Count != links.Count || again.Where((l, n) => l.Hash != links[n].Hash).Any())
+                            return new Fetched { Error = "network" };
+                        links = again;
+                        attempt--;                          // a new link is no retry
+                    }
                     catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException)
                     {
                         Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
@@ -315,7 +329,7 @@ namespace Hd2Qd.License
                     }
                 }
                 if (bytes == null) return new Fetched { Error = "network" };
-                if (Sha256Bytes(bytes) != hash) return new Fetched { Error = "bad_receipt" };
+                if (Sha256Bytes(bytes) != links[i].Hash) return new Fetched { Error = "bad_receipt" };
                 pieces.Add(bytes);
             }
             var plain = OpenPieces(key, pieces, parts, f["plain_hash"]);
@@ -325,15 +339,47 @@ namespace Hd2Qd.License
             return got;
         }
 
-        /// <summary>The sealed bytes from the issuer's short-lived link (null on a non-200).</summary>
+        /// <summary>(1.11.3) The issuer refused a download link (403): it ran out.</summary>
+        sealed class LinkExpired : Exception { }
+
+        /// <summary>(1.11.3) New links for the same payload: /payload asked again. Null when it
+        /// gives none; the caller keeps them only when their hashes are the ones already checked.</summary>
+        static List<(string Url, string Hash)> FreshLinks(string home, string issuer, string wire, string account, string token, int parts)
+        {
+            var (status, body) = Post(home, issuer, "/payload", new Dictionary<string, object> { ["id"] = wire, ["account"] = account, ["renew"] = token, ["parts"] = 1 });
+            if (status != 200) return null;
+            if (parts == 0) return new List<(string, string)> { (Json.Str(body, "url") ?? "", Json.Str(body, "hash") ?? "") };
+            return (Json.List(body, "parts") ?? new List<object>()).OfType<Dictionary<string, object>>()
+                .Select(p => (Json.Str(p, "url") ?? "", Json.Str(p, "hash") ?? "")).ToList();
+        }
+
+        /// <summary>(1.11.3) How long a download may go without a byte before it counts as cut off
+        /// (2026-11-21: a player's first 2.4 MB part had not arrived in 6 minutes and the card said
+        /// "downloading" until the manager was restarted). Tests set it lower.</summary>
+        public static int StallMs = 30000;
+
+        /// <summary>The sealed bytes from the issuer's short-lived link (null on a non-200 other than
+        /// 403, which throws LinkExpired). No byte for StallMs, while waiting for the answer or
+        /// during it, throws IOException: the caller starts it again.</summary>
         static byte[] GetBytes(string home, string issuer, string url)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             using (var request = new HttpRequestMessage(HttpMethod.Get, url))
             {
                 request.Headers.TryAddWithoutValidation("X-HD2QD-License", PluginVersion);
-                using (var r = Download.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult())
+                HttpResponseMessage answer;
+                using (var head = new System.Threading.CancellationTokenSource(StallMs))
                 {
+                    try { answer = Download.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, head.Token).GetAwaiter().GetResult(); }
+                    catch (OperationCanceledException) { throw new IOException("no answer in " + StallMs / 1000.0 + " s"); }
+                }
+                using (var r = answer)
+                {
+                    if ((int)r.StatusCode == 403)
+                    {
+                        Log(home, issuer, "GET /payload/blob -> 403 (the link ran out)");
+                        throw new LinkExpired();
+                    }
                     if ((int)r.StatusCode != 200)
                     {
                         Log(home, issuer, "GET /payload/blob -> " + (int)r.StatusCode);
@@ -345,7 +391,7 @@ namespace Hd2Qd.License
                     {
                         var buf = new byte[81920];
                         int n;
-                        while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                        while ((n = ReadOrStall(s, buf, r, ms.Length)) > 0)
                         {
                             ms.Write(buf, 0, n);
                             if (ms.Length > PayloadMax) throw new InvalidDataException("larger than " + PayloadMax + " bytes");
@@ -355,6 +401,23 @@ namespace Hd2Qd.License
                     }
                 }
             }
+        }
+
+        /// <summary>(1.11.3) One read of a download, given StallMs: none in that time closes the
+        /// connection and throws IOException (a stalled read would otherwise wait forever, since
+        /// HttpClient's own timeout ends when the answer's headers arrive).</summary>
+        static int ReadOrStall(Stream s, byte[] buf, HttpResponseMessage r, long have)
+        {
+            var read = s.ReadAsync(buf, 0, buf.Length);
+            try { if (read.Wait(StallMs)) return read.Result; }
+            catch (AggregateException e)
+            {
+                var inner = e.InnerException;
+                throw inner as IOException ?? new IOException(inner?.Message ?? "read failed", inner);
+            }
+            read.ContinueWith(t => { var _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);   // its error, once the close ends it
+            try { s.Dispose(); r.Dispose(); } catch (Exception) { }
+            throw new IOException("no data for " + StallMs / 1000.0 + " s after " + have + " bytes");
         }
 
         /// <summary>AES-256-CBC/PKCS7 of sealed = IV(16) ‖ ciphertext; null when it is no package or

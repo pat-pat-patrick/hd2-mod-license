@@ -34,6 +34,7 @@ namespace Hd2Qd.License.Tests
             issuer = new Issuer(this);
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             Plugin.RetryDelaysMs = new[] { 0, 0 };      // (1.11.3) retries without the pauses
+            Plugin.StallMs = 1500;                      // (1.11.3) a stalled download noticed at once
         }
 
         public void Dispose()
@@ -988,6 +989,48 @@ namespace Hd2Qd.License.Tests
             return PayDir();
         }
 
+        /// <summary>(1.11.3) A part whose link ran out mid-download: the plugin asks /payload for
+        /// new links, keeps the parts it has, and finishes; a stalled part is started again.</summary>
+        [Theory]
+        [InlineData("expire")] [InlineData("stall")]
+        public void A_part_whose_link_ran_out_or_stalled_is_fetched_again(string how)
+        {
+            Account(A);
+            var mod = PayloadMod();
+            var texts = PartTexts(3, 4);
+            issuer.Payloads.Remove("callouts.v0.12.0");
+            issuer.PublishParts("callouts.v0.12.0", texts);
+            var combo = issuer.ComboOf(A, 3, 4);
+            var expected = Enumerable.Range(0, 3).SelectMany(p => texts[p][combo[p]]).ToArray();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            if (how == "expire") issuer.ExpireBlobAt = 1; else issuer.StallBlobAt = 1;   // the second part
+            Assert.True(Plugin.ClaimAll(Host()));
+            Assert.Equal(1, issuer.Dropped);
+            Assert.Equal(3, issuer.BlobCalls);
+            Assert.Equal(how == "expire" ? 2 : 1, issuer.PayloadCalls);              // new links only when one ran out
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.Equal(expected, File.ReadAllBytes(Path.Combine(PayDir(), "clips.lua")));
+            Plugin.OnGameStop(Host());
+        }
+
+        [Fact]
+        public void A_link_that_keeps_running_out_ends_as_a_network_error()
+        {
+            var mod = PayloadMod();
+            Account(A);
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.ExpireAllBlobs = true;
+            // every link refused: new links asked for twice, then the claim fails as a network error
+            var before = issuer.PayloadCalls;
+            Plugin.ClaimAll(Host());
+            Assert.NotEqual("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.Equal(0, issuer.BlobCalls);
+            Assert.Equal(3, issuer.PayloadCalls - before);
+        }
+
         [Fact]
         public void A_fingerprinted_payload_is_fetched_as_the_accounts_parts_and_played_whole()
         {
@@ -1807,6 +1850,10 @@ namespace Hd2Qd.License.Tests
             /// connection closed with no answer, the next N answered 503 (an edge error), and the next
             /// N blob downloads cut off.</summary>
             public int DropNext, Edge503Next, DropBlobNext, Dropped;
+            /// <summary>(1.11.3) The blob download after this many good ones: answered 403 once (a link
+            /// that ran out), or its headers and a few bytes sent and then nothing for StallHoldMs.</summary>
+            public int ExpireBlobAt = -1, StallBlobAt = -1, StallHoldMs = 3000, BlobsServed;
+            public bool ExpireAllBlobs;
 
             /// <summary>Seals plaintext as the offline tool does (AES-256-CBC/PKCS7, IV ‖ ciphertext)
             /// under a fresh key and mark, and serves it for the wire id from now on.</summary>
@@ -2201,6 +2248,22 @@ namespace Hd2Qd.License.Tests
                         var buf = new byte[length];
                         for (int got = 0; got < length;) got += s.Read(buf, got, length - got);
                         if (path.StartsWith("/payload/blob?") && DropBlobNext > 0) { DropBlobNext--; Dropped++; continue; }
+                        if (path.StartsWith("/payload/blob?") && (ExpireBlobAt == BlobsServed || ExpireAllBlobs))
+                        {
+                            ExpireBlobAt = -1; Dropped++;
+                            var gone = Encoding.ASCII.GetBytes("HTTP/1.1 403 X\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"error\":\"forbidden\"}");
+                            s.Write(gone, 0, gone.Length);
+                            continue;
+                        }
+                        if (path.StartsWith("/payload/blob?") && StallBlobAt == BlobsServed)
+                        {
+                            StallBlobAt = -1; Dropped++;
+                            var part = Encoding.ASCII.GetBytes("HTTP/1.1 200 X\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n0123456789");
+                            s.Write(part, 0, part.Length);
+                            s.Flush();
+                            Thread.Sleep(StallHoldMs);
+                            continue;
+                        }
                         if (!path.StartsWith("/payload/blob?") && DropNext > 0) { DropNext--; Dropped++; continue; }
                         if (!path.StartsWith("/payload/blob?") && Edge503Next > 0)
                         {
@@ -2213,6 +2276,7 @@ namespace Hd2Qd.License.Tests
                         {
                             // (1.10.0) the sealed bytes, by mark, as R2 streams them
                             BlobCalls++;
+                            BlobsServed++;
                             OnBlob?.Invoke();
                             var mark = path.Split('&').First(x => x.StartsWith("mark=")).Substring(5);
                             var pkg = Payloads.Values.FirstOrDefault(x => x.Mark == mark);
