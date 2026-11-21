@@ -1256,6 +1256,95 @@ namespace Hd2Qd.License.Tests
             Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
         }
 
+        // -- (1.11.5) unlocked from the kept key before any request ---------------------------------
+
+        [Fact]
+        public void The_kept_key_unlocks_the_segments_before_any_request()
+        {
+            // a player's log, 2026-11-21: requests to the issuer took 20 s and more, the mod read its
+            // member content about 10 s into the game and found nothing. Now the plaintext is there
+            // before the first request goes.
+            var dir = ClaimedC1(out var mod);
+            bool plainAtRequest = false;
+            issuer.OnSession = () => plainAtRequest = File.Exists(Path.Combine(dir, "seg8.lua"));
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(plainAtRequest, "seg*.lua written before /session was asked");
+            Assert.Contains("decrypted for this session from the key kept here", File.ReadAllText(Plugin.LogPath(Home)));
+            Assert.Contains("game started: 1 mod(s) with sealed member content in the library", File.ReadAllText(Plugin.LogPath(Home)));
+        }
+
+        [Fact]
+        public void The_claim_keeps_the_key_so_the_first_game_needs_no_network()
+        {
+            var dir = ClaimedC1(out var mod);
+            Assert.True(File.Exists(Path.Combine(dir, "key.dpapi")), "the key is kept at the claim");
+            issuer.SessionError = "network_stub";                  // the first game, the issuer out of reach
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+        }
+
+        [Fact]
+        public void The_kept_key_unlocks_the_payload_before_any_request()
+        {
+            var dir = ClaimedPayload(out var mod);
+            bool plainAtRequest = false;
+            issuer.OnPayloadAsk = () => plainAtRequest = File.Exists(Path.Combine(dir, "clips.lua"));
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(plainAtRequest, "clips.lua written before /payload was asked");
+        }
+
+        [Fact]
+        public void Renewing_a_kept_key_is_one_try_with_no_retry()
+        {
+            // the unlock is done: a lost renewal is not sent again (the next game renews it)
+            var dir = ClaimedC1(out var mod);
+            long before = issuer.SessionCalls;
+            issuer.DropNext = 3;
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+            Assert.Equal(1, issuer.Dropped);
+            Assert.Equal(2, issuer.DropNext);
+        }
+
+        [Fact]
+        public void Without_a_kept_key_the_game_start_asks_with_retries()
+        {
+            var dir = ClaimedC1(out var mod);
+            File.Delete(Path.Combine(dir, "key.dpapi"));           // e.g. kept on another computer
+            issuer.DropNext = 2;                                    // two lost, the third answered
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+            Assert.Equal(2, issuer.Dropped);
+        }
+
+        [Fact]
+        public void A_replaced_payload_is_fetched_and_unlocked_in_the_renewal()
+        {
+            var dir = ClaimedPayload(out var mod);
+            var newer = Encoding.UTF8.GetBytes("CLIPS = { replaced = true }\n");
+            issuer.Publish("callouts.v0.12.0", newer);              // the author replaces the package
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.Equal(newer, File.ReadAllBytes(Path.Combine(dir, "clips.lua")));
+        }
+
+        [Fact]
+        public void A_copy_loaded_later_stops_the_older_copys_game_watch()
+        {
+            // the plugin added while the manager is open: the older copy stays loaded (no unload on
+            // .NET Framework) and watched the game too (a player's log: every start and stop twice)
+            var older = System.Reflection.Assembly.Load(File.ReadAllBytes(typeof(Plugin).Assembly.Location));
+            Assert.NotSame(typeof(Plugin).Assembly, older);
+            var t = older.GetType(typeof(Plugin).FullName);
+            const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+            var timer = new System.Threading.Timer(_ => { }, null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+            t.GetField("gameTimer", all).SetValue(null, timer);
+            t.GetField("gameHost", all).SetValue(null, Host());
+            Plugin.RetireOlderCopies(Host());
+            Assert.Null(t.GetField("gameTimer", all).GetValue(null));
+            Assert.Null(t.GetField("gameHost", all).GetValue(null));
+            Assert.Contains("an older copy of this plugin", File.ReadAllText(Plugin.LogPath(Home)));
+        }
+
         [Fact]
         public void Past_the_grace_offline_the_segments_stay_sealed()
         {
@@ -1346,8 +1435,8 @@ namespace Hd2Qd.License.Tests
         [Fact]
         public void Without_a_ticket_the_key_is_used_but_not_kept()
         {
+            issuer.SessionNoTicket = true;                          // from the claim on (1.11.5: the claim fetches the key too)
             var dir = ClaimedC1(out var mod);
-            issuer.SessionNoTicket = true;
             Assert.True(Plugin.OnGameStart(Host()), "online, the session still decrypts");
             Assert.False(File.Exists(Path.Combine(dir, "key.dpapi")), "but no key is kept for later");
         }
@@ -1643,7 +1732,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.4", Plugin.PluginVersion);
+            Assert.Equal("1.11.5", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1663,7 +1752,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.4\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.5\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1873,6 +1962,8 @@ namespace Hd2Qd.License.Tests
             public int PayloadCalls, BlobCalls;
             /// <summary>(1.11.1) Called on each blob download, while the plugin waits for it.</summary>
             public Action OnBlob;
+            /// <summary>(1.11.5) Called as /session and /payload are asked, while the plugin waits.</summary>
+            public Action OnSession, OnPayloadAsk;
             public long PayloadGrace = 20 * 86400;
             public bool LastSegmentsPayload;
             /// <summary>(1.11.3) A network that loses requests: the next N requests are read and the
@@ -2156,6 +2247,7 @@ namespace Hd2Qd.License.Tests
                 if (path == "/payload")
                 {
                     PayloadCalls++;
+                    OnPayloadAsk?.Invoke();
                     string wire = Json.Str(body, "id"), acct = Json.Str(body, "account");
                     if (PayloadError != null) return (403, new Dictionary<string, object> { ["error"] = PayloadError });
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var pm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
@@ -2204,6 +2296,7 @@ namespace Hd2Qd.License.Tests
                 if (path == "/session")
                 {
                     SessionCalls++;
+                    OnSession?.Invoke();
                     string id = Json.Str(body, "id"), version = Json.Str(body, "version"), acct = Json.Str(body, "account");
                     if (SessionError != null) return (403, new Dictionary<string, object> { ["error"] = SessionError });
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var sm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });

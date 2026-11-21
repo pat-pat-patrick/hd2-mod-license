@@ -574,13 +574,17 @@ namespace Hd2Qd.License
             // nothing; /redeem with the same code signs again; a /claim whose first answer was lost
             // finds its one-use code spent and says "sign in again", as a new sign-in would need anyway.
             var (status, d) = PostOnce(home, issuer, path, body);
-            for (int i = 0; i < RetryDelaysMs.Length && Retryable(status); i++)
+            for (int i = 0; i < RetryDelaysMs.Length && !oneTry && Retryable(status); i++)
             {
                 if (RetryDelaysMs[i] > 0) System.Threading.Thread.Sleep(RetryDelaysMs[i]);
                 (status, d) = PostOnce(home, issuer, path, body);
             }
             return (status, d);
         }
+
+        /// <summary>(1.11.5) Set on a thread while it only renews what already works (a game start's
+        /// last pass): its requests go once, with no retry.</summary>
+        [ThreadStatic] static bool oneTry;
 
         /// <summary>(1.11.3) The pauses before each retry, in milliseconds; tests set them to 0.</summary>
         public static int[] RetryDelaysMs = { 2000, 5000 };

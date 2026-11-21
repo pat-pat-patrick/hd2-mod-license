@@ -583,7 +583,11 @@ namespace Hd2Qd.License
         /// with K_c from the issuer now (a fresh receipt; a package the author replaced is downloaded
         /// again first) or from the cache within the receipt's expires. Called from OnGameStart, under
         /// segmentsLock. Returns (decrypted any, how many payload mods there are).</summary>
-        static (bool Any, int Count) UnlockPayloads(Dictionary<string, object> host, bool late)
+        /// <summary>One pass over the library's payloads at a game start (1.11.5: see OnGameStart).
+        /// Kept: unlock from the key kept here, no request. Online: the ones Kept did not open, the
+        /// issuer asked (else the kept key). Renew: the ones Kept opened, asked once; a package the
+        /// author replaced is fetched and unlocked again.</summary>
+        static (bool Any, int Count) UnlockPayloads(Dictionary<string, object> host, bool late, HashSet<string> opened, Pass pass)
         {
             bool any = false;
             int count = 0;
@@ -597,27 +601,48 @@ namespace Hd2Qd.License
                 var decl = Declaration(path);
                 if (decl == null || Json.Str(decl, "error") != null) continue;
                 count++;
+                bool wasOpened = opened.Contains("pay|" + path);
+                if (pass == Pass.Online && wasOpened || pass == Pass.Renew && !wasOpened) continue;
                 bool alsoSegments = Json.Bool(SegmentsOf(path), "sealed");
                 string issuer = Json.Str(decl, "issuer");
                 try
                 {
                     var held = PayloadHeld(appData, decl, pay);
-                    if (held == null) { Log(home, issuer, PayLabel(path, pay) + ": nothing to unlock (no member content downloaded here for an account of this computer)"); continue; }
-                    var key = PayloadSessionKey(home, appData, decl, pay, held);
-                    if (key == null)
+                    if (held == null)
                     {
-                        SetLastUnlock(path, "no_key");
-                        Log(home, issuer, PayLabel(path, pay) + ": sealed (no key: offline past grace, or another computer)");
+                        if (pass == Pass.Online) Log(home, issuer, PayLabel(path, pay) + ": nothing to unlock (no member content downloaded here for an account of this computer)");
                         continue;
                     }
+                    byte[] key;
+                    if (pass == Pass.Kept)
+                    {
+                        var dir = PayloadFolder(appData, issuer, pay);
+                        var resident = VerifyPayloadReceipt(File.ReadAllText(Path.Combine(dir, "receipt.txt")), issuer, Json.Str(decl, "key"));
+                        key = resident == null ? null : CachedPayloadKey(home, appData, issuer, pay, held, resident["sealed_hash"]);
+                    }
+                    else key = PayloadSessionKey(home, appData, decl, pay, held);
+                    if (key == null)
+                    {
+                        if (pass == Pass.Online)
+                        {
+                            SetLastUnlock(path, "no_key");
+                            Log(home, issuer, PayLabel(path, pay) + ": sealed (no key: offline past grace, or another computer)");
+                        }
+                        continue;
+                    }
+                    // Renew: the plaintext written in the first pass stays, unless a replaced package took it
+                    if (pass == Pass.Renew && File.Exists(Path.Combine(PayloadFolder(appData, issuer, pay), Json.Str(pay, "file"))))
+                    { Array.Clear(key, 0, key.Length); continue; }
                     held = PayloadHeld(appData, decl, pay) ?? held;     // a fresh download may have replaced it
                     if (DecryptPayload(appData, decl, pay, key))
                     {
                         any = true;
+                        opened.Add("pay|" + path);
                         if (late || !alsoSegments) SetLastUnlock(path, late ? "late" : null);
-                        Log(home, issuer, PayLabel(path, pay) + (late ? ": decrypted, but the game started before this program: unlocked from the next game" : ": decrypted for this session") + " (account " + held + ")");
+                        Log(home, issuer, PayLabel(path, pay) + (late ? ": decrypted, but the game started before this program: unlocked from the next game"
+                                                                     : pass == Pass.Kept ? ": decrypted for this session from the key kept here" : ": decrypted for this session") + " (account " + held + ")");
                     }
-                    else Log(home, issuer, PayLabel(path, pay) + ": the content did not decrypt to what the receipt signs (sealed)");
+                    else if (pass != Pass.Kept) Log(home, issuer, PayLabel(path, pay) + ": the content did not decrypt to what the receipt signs (sealed)");
                     Array.Clear(key, 0, key.Length);
                 }
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)

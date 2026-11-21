@@ -246,6 +246,13 @@ namespace Hd2Qd.License
                         || !f.TryGetValue(hashField, out var rh) || rh != Utf8Sha256(string.Concat(texts)))
                     { error = error ?? "bad_receipt"; continue; }
                     WriteSegments(appData, issuer, id, version, texts, receipt, ext);
+                    // (1.11.5) a sealed version's key is fetched and kept now, so the first game after
+                    // the download is unlocked from it at once, as every later one (OnGameStart)
+                    if (sealedV)
+                    {
+                        try { var k = SessionKey(home, appData, decl, seg, account); if (k != null) Array.Clear(k, 0, k.Length); }
+                        catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException) { }
+                    }
                     return new Dictionary<string, object> { ["claimed"] = true, ["account"] = account };
                 }
             return Err(error ?? "unknown");

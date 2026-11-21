@@ -49,7 +49,42 @@ namespace Hd2Qd.License
             lock (gameLock)
             {
                 gameHost = host;
-                if (gameTimer == null) gameTimer = new Timer(_ => GameTick(), null, 0, 5000);
+                if (gameTimer == null)
+                {
+                    RetireOlderCopies(host);
+                    gameTimer = new Timer(_ => GameTick(), null, 0, 5000);
+                }
+            }
+        }
+
+        /// <summary>(1.11.5) A plugin added while the manager is open is loaded beside the copy that
+        /// was already there, which .NET Framework cannot unload: both watched the game, unlocked and
+        /// removed the same files, and logged every game start and stop twice (a player's log,
+        /// 2026-11-21). The copy loaded last stops the older ones' game watch and their retry of
+        /// pending content; they keep answering the window until the manager restarts.</summary>
+        public static void RetireOlderCopies(Dictionary<string, object> host)
+        {
+            var mine = typeof(Plugin).Assembly;
+            var name = mine.GetName().Name;
+            const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+            foreach (var other in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (ReferenceEquals(other, mine) || other.GetName().Name != name) continue;
+                try
+                {
+                    var t = other.GetType(typeof(Plugin).FullName);
+                    if (t == null) continue;
+                    bool stopped = false;
+                    // its tick returns at once without a host; then its timers go
+                    t.GetField("gameHost", all)?.SetValue(null, null);
+                    foreach (var field in new[] { "gameTimer", "pendingTimer" })
+                    {
+                        var f = t.GetField(field, all);
+                        if (f?.GetValue(null) is IDisposable timer) { timer.Dispose(); f.SetValue(null, null); stopped = true; }
+                    }
+                    if (stopped) Log(Home(host), null, "an older copy of this plugin (" + other.GetName().Version + "), loaded before this one, stopped watching the game");
+                }
+                catch (Exception e) when (e is System.Reflection.TargetException || e is ArgumentException || e is FieldAccessException || e is MemberAccessException || e is TypeLoadException) { }
             }
         }
 
@@ -100,51 +135,121 @@ namespace Hd2Qd.License
             lock (lastUnlock) { if (what == null) lastUnlock.Remove(modFolder); else lastUnlock[modFolder] = what; }
         }
 
+        /// <summary>(1.11.5) A game start, in three passes, so the plaintext is there before the
+        /// mods load (2026-11-21: a mod reads its member content once, about 10 s after the game
+        /// starts; a player whose requests to the issuer took 20 s and more, with the 1.11.3 retries
+        /// up to a minute, got it after that and the mod stayed quiet all game):
+        /// 1. every mod whose key is kept here within its grace is unlocked from that key, with no request;
+        /// 2. the mods the first pass could not open ask the issuer, as before (retries and all);
+        /// 3. the mods the first pass opened ask once each, with no retry, to renew the kept key and
+        ///    see whether the author replaced the content (a replaced payload is fetched and unlocked again).
+        /// The grace and every check are the same as before: a refused or unreachable request already
+        /// fell back to the kept key, so taking it first lets nothing through that was kept out.</summary>
         public static bool OnGameStart(Dictionary<string, object> host, bool late)
         {
             bool any = false;
             string home = Home(host), appData = AppData(host);
-            int sealedCount = 0;
-            lock (segmentsLock)
-                foreach (var m in LibraryOf(host))
-                {
-                    var path = Json.Str(m, "path");
-                    if (path == null || !Directory.Exists(path)) continue;
-                    var seg = SegmentsOf(path);
-                    if (seg == null || Json.Str(seg, "error") != null || !Json.Bool(seg, "sealed")) continue;
-                    var decl = Declaration(path);
-                    if (decl == null || Json.Str(decl, "error") != null) continue;
-                    sealedCount++;
-                    try
-                    {
-                        var held = HeldAccount(appData, decl, seg);
-                        // no resident ciphertext to open: said, so a log shows why the mod stayed quiet (1.9.0)
-                        if (held == null) { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": nothing to unlock (no member content downloaded here for an account of this computer)"); continue; }
-                        var key = SessionKey(home, appData, decl, seg, held);
-                        if (key == null) { SetLastUnlock(path, "no_key"); Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); continue; }
-                        if (DecryptPlain(appData, decl, seg, key))
-                        {
-                            any = true;
-                            SetLastUnlock(path, late ? "late" : null);
-                            Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + (late ? ": decrypted, but the game started before this program: unlocked from the next game" : ": decrypted for this session") + " (account " + held + ")");
-                        }
-                        else Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": the content did not decrypt to what the receipt signs (sealed)");
-                        Array.Clear(key, 0, key.Length);
-                    }
-                    catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)
-                    { Log(home, Json.Str(decl, "issuer"), SegLabel(path, seg) + ": " + e.GetType().Name); }
-                }
-            // (1.10.0) the payloads: a mod with both is counted once
+            var opened = new HashSet<string>(StringComparer.OrdinalIgnoreCase);    // "seg|<folder>", "pay|<folder>"
+            int sealedCount;
             lock (segmentsLock)
             {
-                var (payAny, _) = UnlockPayloads(host, late);
-                any |= payAny;
+                any |= UnlockSegments(host, late, opened, Pass.Kept).Any;
+                any |= UnlockPayloads(host, late, opened, Pass.Kept).Any;
+            }
+            lock (segmentsLock)
+            {
+                var (segAny, segSeen) = UnlockSegments(host, late, opened, Pass.Online);
+                any |= segAny;
+                sealedCount = segSeen;
+                any |= UnlockPayloads(host, late, opened, Pass.Online).Any;
+            }
+            lock (segmentsLock)
+            {
+                oneTry = true;
+                try
+                {
+                    UnlockSegments(host, late, opened, Pass.Renew);
+                    UnlockPayloads(host, late, opened, Pass.Renew);
+                }
+                finally { oneTry = false; }
+                // (1.10.0) the payloads: a mod with both is counted once
                 sealedCount += LibraryOf(host).Count(m => Json.Str(m, "path") is string p && Directory.Exists(p)
                     && PayloadOf(p) is Dictionary<string, object> pay && Json.Str(pay, "error") == null && !Json.Bool(SegmentsOf(p), "sealed"));
             }
             // (1.9.0) every game start, so a log tells a game this program saw from one it never saw
             Log(home, null, (late ? "the game was already running at this program's start" : "game started") + ": " + sealedCount + " mod(s) with sealed member content in the library");
             return any;
+        }
+
+        /// <summary>(1.11.5) The passes of a game start (OnGameStart).</summary>
+        enum Pass { Kept, Online, Renew }
+
+        /// <summary>(1.11.5) One pass over the library's sealed segments. Kept: unlock from the key
+        /// kept here, no request. Online: the mods Kept did not open, the issuer asked (else the kept
+        /// key, as before 1.11.5). Renew: the mods Kept opened, asked once to renew the kept key, and
+        /// decrypted again only if their plaintext went. Any: a set was decrypted; Seen: the
+        /// library's sealed mods, for the game-start line.</summary>
+        static (bool Any, int Seen) UnlockSegments(Dictionary<string, object> host, bool late, HashSet<string> opened, Pass pass)
+        {
+            bool any = false;
+            string home = Home(host), appData = AppData(host);
+            int seen = 0;
+            foreach (var m in LibraryOf(host))
+            {
+                var path = Json.Str(m, "path");
+                if (path == null || !Directory.Exists(path)) continue;
+                var seg = SegmentsOf(path);
+                if (seg == null || Json.Str(seg, "error") != null || !Json.Bool(seg, "sealed")) continue;
+                var decl = Declaration(path);
+                if (decl == null || Json.Str(decl, "error") != null) continue;
+                seen++;
+                bool wasOpened = opened.Contains("seg|" + path);
+                if (pass == Pass.Online && wasOpened || pass == Pass.Renew && !wasOpened) continue;
+                string issuer = Json.Str(decl, "issuer");
+                try
+                {
+                    var held = HeldAccount(appData, decl, seg);
+                    if (held == null)
+                    {
+                        // no resident ciphertext to open: said, so a log shows why the mod stayed quiet (1.9.0)
+                        if (pass == Pass.Online) Log(home, issuer, SegLabel(path, seg) + ": nothing to unlock (no member content downloaded here for an account of this computer)");
+                        continue;
+                    }
+                    byte[] key = pass == Pass.Kept
+                        ? CachedKey(home, appData, issuer, Json.Str(seg, "id"), Json.Str(seg, "version"), held)
+                        : SessionKey(home, appData, decl, seg, held);
+                    if (key == null)
+                    {
+                        if (pass == Pass.Online) { SetLastUnlock(path, "no_key"); Log(home, issuer, SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); }
+                        continue;
+                    }
+                    // Renew: the key is renewed (SessionKey keeps it); the plaintext written in the
+                    // first pass stays, unless it went
+                    if (pass == Pass.Renew && PlainPresent(appData, decl, seg)) { Array.Clear(key, 0, key.Length); continue; }
+                    if (DecryptPlain(appData, decl, seg, key))
+                    {
+                        any = true;
+                        opened.Add("seg|" + path);
+                        SetLastUnlock(path, late ? "late" : null);
+                        Log(home, issuer, SegLabel(path, seg) + (late ? ": decrypted, but the game started before this program: unlocked from the next game"
+                                                                       : pass == Pass.Kept ? ": decrypted for this session from the key kept here" : ": decrypted for this session") + " (account " + held + ")");
+                    }
+                    else if (pass != Pass.Kept) Log(home, issuer, SegLabel(path, seg) + ": the content did not decrypt to what the receipt signs (sealed)");
+                    Array.Clear(key, 0, key.Length);
+                }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException)
+                { Log(home, issuer, SegLabel(path, seg) + ": " + e.GetType().Name); }
+            }
+            return (any, seen);
+        }
+
+        /// <summary>(1.11.5) Whether a sealed version's seg*.lua are all there (written this game).</summary>
+        static bool PlainPresent(string appData, Dictionary<string, object> decl, Dictionary<string, object> seg)
+        {
+            var dir = SegmentsFolder(appData, Json.Str(decl, "issuer"), Json.Str(seg, "id"), Json.Str(seg, "version"));
+            int n = (int)Json.Long(seg, "count");
+            for (int i = 1; i <= n; i++) if (!File.Exists(Path.Combine(dir, "seg" + i + ".lua"))) return false;
+            return true;
         }
 
         /// <summary>A game stop (or the manager's start with the game down): the plaintext of every
