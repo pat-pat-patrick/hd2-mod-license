@@ -132,6 +132,7 @@ namespace Hd2Qd.License
         public static bool Start(Dictionary<string, object> host)
         {
             Interlocked.Exchange(ref startedOnce, 1);
+            RememberRefresh(host);         // (1.11.2) the window's refresh, for redraws from the rows' calls
             // (1.5.0) the mods' questions answered from now on (Attest.cs)
             try { Watch(host); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is ArgumentException) { }

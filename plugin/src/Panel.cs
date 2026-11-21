@@ -371,10 +371,24 @@ namespace Hd2Qd.License
         /// <summary>The manager's redraw, on its own thread when it has a window.</summary>
         static void RefreshFromWorker(Dictionary<string, object> host)
         {
-            var refresh = Get<Action>(host, "refresh");
+            // (1.11.2) the manager hands the rows' calls (ModNote, and the claims they start) a host
+            // without refresh; the window's own refresh, kept from the last host that had one, redraws
+            // instead. 1.11.1 left the row on "Awaiting the author" after a retry had fetched the
+            // content (2026-11-21: "列表里写了等待创作者发布，但是插件上写了已经就绪")
+            var refresh = RememberRefresh(host) ?? lastRefresh;
             if (refresh == null) return;
             var d = Application.Current?.Dispatcher;
             if (d != null) d.BeginInvoke(refresh); else refresh();
+        }
+
+        static Action lastRefresh;
+
+        /// <summary>The host's refresh, kept as the window's when it has one.</summary>
+        static Action RememberRefresh(Dictionary<string, object> host)
+        {
+            var refresh = Get<Action>(host, "refresh");
+            if (refresh != null) lastRefresh = refresh;
+            return refresh;
         }
 
         /// <summary>A failed sign-in in words: {error, detail?, wait_days?}.</summary>

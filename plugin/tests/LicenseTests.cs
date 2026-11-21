@@ -1037,6 +1037,29 @@ namespace Hd2Qd.License.Tests
             Assert.False(Plugin.RetryingPending, "nothing waits any more: the timer is gone");
         }
 
+        /// <summary>(1.11.2) The rows' calls come with a host that cannot redraw the window: a retry
+        /// such a call started still redraws through the window's refresh, kept from its own host.</summary>
+        [Fact]
+        public void A_retry_started_from_a_row_still_redraws_the_window()
+        {
+            Account(A);
+            var mod = PayloadMod();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            int redraws = 0;
+            var window = Host();
+            window["refresh"] = (Action)(() => redraws++);
+            issuer.PayloadError = "payload_pending";
+            Plugin.Start(window);                               // the window's start: its host can redraw
+            Assert.Equal("pending", Plugin.SegmentsState(Home, appData, mod));
+            Plugin.ClaimAll(Host());                            // a claim a row started: no refresh in its host
+            issuer.PayloadError = null;                         // the author publishes
+            redraws = 0;
+            Plugin.RetryPending();
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(redraws >= 1, "the window is redrawn after the retry fetched it (" + redraws + ")");
+        }
+
         [Fact]
         public void Payload_versions_no_library_mod_uses_are_removed()
         {
@@ -1498,7 +1521,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.1", Plugin.PluginVersion);
+            Assert.Equal("1.11.2", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1518,7 +1541,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.1\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.2\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along

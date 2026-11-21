@@ -374,11 +374,14 @@ namespace Hd2Qd.License
                 }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+            RememberRefresh(host);
             lock (pendingLock)
             {
                 if (waiting)
                 {
-                    pendingHost = host;
+                    // (1.11.2) a host that can redraw the window is kept over one that cannot (the rows')
+                    if (pendingHost == null || Get<Action>(host, "refresh") != null || Get<Action>(pendingHost, "refresh") == null)
+                        pendingHost = host;
                     if (pendingTimer == null)
                         pendingTimer = new System.Threading.Timer(_ => RetryPending(), null, PendingRetrySeconds * 1000, PendingRetrySeconds * 1000);
                 }
@@ -408,6 +411,7 @@ namespace Hd2Qd.License
         public static void StopRetrying()
         {
             lock (pendingLock) { pendingTimer?.Dispose(); pendingTimer = null; pendingHost = null; }
+            lastRefresh = null;
         }
 
         static bool ClaimAllOnce(Dictionary<string, object> host, bool force)
