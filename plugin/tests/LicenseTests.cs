@@ -915,6 +915,82 @@ namespace Hd2Qd.License.Tests
             Assert.False(File.Exists(Path.Combine(SegDir("v0.12.0"), "seg1.lua")) || File.Exists(Path.Combine(PayDir(), "clips.lua")));
         }
 
+        // -- (1.11.0) fingerprinted payloads: N parts, the account's variant of each ---------------
+
+        static byte[][][] PartTexts(int parts, int variants) =>
+            Enumerable.Range(0, parts).Select(p => Enumerable.Range(0, variants).Select(v =>
+                Encoding.UTF8.GetBytes("CLIPS[\"en\"][\"line" + p + "\"] = { dur = 1, e = \"" + new string((char)('A' + v), 5000 + 100 * p) + "\" } -- é\n")).ToArray()).ToArray();
+
+        /// <summary>Signed in, a payload mod whose payload is published in 3 parts x 4 variants.</summary>
+        string ClaimedParts(out string mod, out byte[] expected)
+        {
+            Account(A);
+            mod = PayloadMod();
+            var texts = PartTexts(3, 4);
+            issuer.Payloads.Remove("callouts.v0.12.0");
+            issuer.PublishParts("callouts.v0.12.0", texts);
+            var combo = issuer.ComboOf(A, 3, 4);
+            expected = Enumerable.Range(0, 3).SelectMany(p => texts[p][combo[p]]).ToArray();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            Assert.True(Plugin.ClaimAll(Host()));
+            return PayDir();
+        }
+
+        [Fact]
+        public void A_fingerprinted_payload_is_fetched_as_the_accounts_parts_and_played_whole()
+        {
+            var dir = ClaimedParts(out var mod, out var expected);
+            Assert.True(issuer.LastPayloadParts, "the request says this plugin puts parts together");
+            Assert.Equal(3, issuer.BlobCalls);
+            Assert.Equal(new[] { "key.dpapi", "part1.seal", "part2.seal", "part3.seal", "receipt.txt" },
+                         Directory.GetFiles(dir).Select(Path.GetFileName).OrderBy(x => x, StringComparer.Ordinal));
+            Assert.Contains("\nparts=3\n", File.ReadAllText(Path.Combine(dir, "receipt.txt")));
+            Assert.Equal(A, Plugin.PayloadHeld(appData, Decl(mod), Plugin.PayloadOf(mod)));
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.Equal(expected, File.ReadAllBytes(Path.Combine(dir, "clips.lua")));
+            Plugin.OnGameStop(Host());
+            Assert.False(File.Exists(Path.Combine(dir, "clips.lua")));
+            Assert.True(File.Exists(Path.Combine(dir, "part2.seal")), "the parts stay resident");
+            // offline, within the grace, the cached key opens the parts
+            issuer.PayloadError = "network_stub";
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.Equal(expected, File.ReadAllBytes(Path.Combine(dir, "clips.lua")));
+        }
+
+        [Theory]
+        [InlineData("parthash")] [InlineData("count")] [InlineData("plain")] [InlineData("url")] [InlineData("bytes")]
+        public void A_fingerprinted_payload_that_does_not_check_out_is_not_written(string spoil)
+        {
+            Account(A);
+            var mod = PayloadMod();
+            issuer.Payloads.Remove("callouts.v0.12.0");
+            issuer.PublishParts("callouts.v0.12.0", PartTexts(3, 4));
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.PayloadSpoil = spoil;
+            Assert.False(Plugin.ClaimAll(Host()));
+            Assert.Equal("bad_receipt", Plugin.SegmentsState(Home, appData, mod));
+            Assert.False(Directory.Exists(PayDir()), "nothing is written for " + spoil);
+        }
+
+        [Fact]
+        public void A_tampered_or_missing_part_is_not_held()
+        {
+            var dir = ClaimedParts(out var mod, out _);
+            var part = Path.Combine(dir, "part2.seal");
+            var b = File.ReadAllBytes(part);
+            b[20] ^= 1;
+            File.WriteAllBytes(part, b);
+            Assert.Null(Plugin.PayloadHeld(appData, Decl(mod), Plugin.PayloadOf(mod)));
+            File.Delete(part);
+            Assert.Null(Plugin.PayloadHeld(appData, Decl(mod), Plugin.PayloadOf(mod)));
+            issuer.PayloadError = "network_stub";
+            Assert.False(Plugin.OnGameStart(Host()));
+            Assert.False(File.Exists(Path.Combine(dir, "clips.lua")));
+        }
+
         [Fact]
         public void Payload_versions_no_library_mod_uses_are_removed()
         {
@@ -1376,7 +1452,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.10.0", Plugin.PluginVersion);
+            Assert.Equal("1.11.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1396,7 +1472,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.10.0\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1625,14 +1701,42 @@ namespace Hd2Qd.License.Tests
             static string Hex(byte[] b) => string.Concat(b.Select(x => x.ToString("x2")));
             static string Sha(byte[] b) { using (var sha = SHA256.Create()) return Hex(sha.ComputeHash(b)); }
 
-            /// <summary>A RECEIPT 2 (spec/static-resources draft 2), its lines in order.</summary>
-            public string PayloadReceipt(string wire, string account, string mark, string sealedHash, string plainHash, string keyHash, long issued, long grace, string signWith = "a")
+            /// <summary>A RECEIPT 2 (spec/static-resources draft 2), its lines in order; parts=N after
+            /// mark for a fingerprinted payload (1.11.0).</summary>
+            public string PayloadReceipt(string wire, string account, string mark, string sealedHash, string plainHash, string keyHash, long issued, long grace, string signWith = "a", int parts = 0)
             {
                 var text = "HD2 PAYLOAD RECEIPT 2" + NL + "issuer=" + Name + NL + "account=" + account + NL + "id=" + wire + NL + "mark=" + mark + NL +
+                           (parts > 0 ? "parts=" + parts + NL : "") +
                            "alg=A256CBC" + NL + "sealed_hash=" + sealedHash + NL + "plain_hash=" + plainHash + NL + "key_hash=" + keyHash + NL +
                            "issued=" + issued + NL + "expires=" + (issued + grace) + NL;
                 return Sign(signWith, text);
             }
+
+            /// <summary>(1.11.0) A fingerprinted payload: per wire id, parts[p][v] plaintext and sealed
+            /// bytes under one key; an account's combo is variant (account's p-th hex digit) mod V.</summary>
+            public readonly Dictionary<string, (byte[] Key, byte[][][] Plain, byte[][][] Sealed)> Parted =
+                new Dictionary<string, (byte[], byte[][][], byte[][][])>();
+            public bool LastPayloadParts;
+
+            public void PublishParts(string wire, byte[][][] plain)
+            {
+                var key = new byte[32];
+                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(key);
+                var sealedParts = plain.Select(row => row.Select(pt =>
+                {
+                    using (var aes = Aes.Create())
+                    {
+                        aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7; aes.Key = key; aes.GenerateIV();
+                        using (var enc = aes.CreateEncryptor()) return aes.IV.Concat(enc.TransformFinalBlock(pt, 0, pt.Length)).ToArray();
+                    }
+                }).ToArray()).ToArray();
+                Parted[wire] = (key, plain, sealedParts);
+            }
+
+            public int[] ComboOf(string account, int parts, int variants) =>
+                Enumerable.Range(0, parts).Select(p => Convert.ToInt32(account[p % 16].ToString(), 16) % variants).ToArray();
+
+            static string Utf8Sha(string s) { using (var sha = SHA256.Create()) return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(s))); }
 
             /// <summary>Marks a version sealed (C1): it gets a content key, and /segments serves it as
             /// ciphertext when the plugin asks with enc.</summary>
@@ -1855,6 +1959,33 @@ namespace Hd2Qd.License.Tests
                     if (PayloadError != null) return (403, new Dictionary<string, object> { ["error"] = PayloadError });
                     if (!Members.TryGetValue(Json.Str(body, "renew") ?? "", out var pm)) return (403, new Dictionary<string, object> { ["error"] = "unknown" });
                     if (!pm.Accounts.Contains(acct)) return (403, new Dictionary<string, object> { ["error"] = "payload_account" });
+                    LastPayloadParts = Json.Long(body, "parts") == 1;
+                    if (Parted.TryGetValue(wire ?? "", out var fp))
+                    {
+                        if (!LastPayloadParts) return (409, new Dictionary<string, object> { ["error"] = "update to 1.11.0" });
+                        int n = fp.Plain.Length, nv = fp.Plain[0].Length;
+                        var combo = ComboOf(acct, n, nv);
+                        var list = new List<object>();
+                        string sealedJoin = "", plainJoin = "";
+                        for (int pp = 0; pp < n; pp++)
+                        {
+                            var h = Sha(fp.Sealed[pp][combo[pp]]);
+                            if (PayloadSpoil == "parthash" && pp == 1) h = new string('e', 64);
+                            var partHost = PayloadSpoil == "url" && pp == n - 1 ? "127.0.0.2:" + Name.Split(':')[1] : Name;
+                            list.Add(new Dictionary<string, object>
+                            {
+                                ["url"] = "http://" + partHost + "/payload/blob?id=" + wire + "&mark=" + pp.ToString("x2") + combo[pp].ToString("x2") + "&t=1",
+                                ["hash"] = h,
+                            });
+                            sealedJoin += Sha(fp.Sealed[pp][combo[pp]]);
+                            plainJoin += Sha(fp.Plain[pp][combo[pp]]);
+                        }
+                        if (PayloadSpoil == "count") list.RemoveAt(list.Count - 1);
+                        var mark = string.Concat(combo.Select(c => c.ToString("x")));
+                        var rec = PayloadReceipt(wire, acct, mark, Utf8Sha(sealedJoin), PayloadSpoil == "plain" ? new string('e', 64) : Utf8Sha(plainJoin), Sha(fp.Key),
+                                                 DateTimeOffset.UtcNow.ToUnixTimeSeconds(), PayloadGrace, "a", n);
+                        return (200, new Dictionary<string, object> { ["parts"] = list, ["key"] = Hex(fp.Key), ["receipt"] = rec });
+                    }
                     if (!Payloads.TryGetValue(wire ?? "", out var p)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
                     string sh = Sha(p.Sealed), ph = Sha(p.Plain), kh = Sha(p.Key);
                     if (PayloadSpoil == "sealed") sh = new string('e', 64);
@@ -1951,6 +2082,13 @@ namespace Hd2Qd.License.Tests
                             var mark = path.Split('&').First(x => x.StartsWith("mark=")).Substring(5);
                             var pkg = Payloads.Values.FirstOrDefault(x => x.Mark == mark);
                             byte[] blob = pkg.Sealed?.ToArray() ?? new byte[0];
+                            // (1.11.0) a part variant: mark = part, variant (2 hex each), of the wire id asked
+                            var wireAsked = path.Split('?')[1].Split('&').First(x => x.StartsWith("id=")).Substring(3);
+                            if (pkg.Sealed == null && mark.Length == 4 && Parted.TryGetValue(wireAsked, out var fpb))
+                            {
+                                blob = fpb.Sealed[Convert.ToInt32(mark.Substring(0, 2), 16)][Convert.ToInt32(mark.Substring(2, 2), 16)].ToArray();
+                                pkg.Sealed = blob;
+                            }
                             if (PayloadSpoil == "bytes" && blob.Length > 40) blob[40] ^= 1;
                             var head2 = Encoding.ASCII.GetBytes("HTTP/1.1 " + (pkg.Sealed != null ? 200 : 404) + " X\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
                                                                 blob.Length + "\r\nConnection: close\r\n\r\n");

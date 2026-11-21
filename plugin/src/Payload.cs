@@ -30,6 +30,51 @@ namespace Hd2Qd.License
         const string SealFile = "payload.seal";
         static readonly Regex DeployLicenses = new Regex(@"^licenses/([A-Za-z0-9._-]{1,64})\z");
         static readonly HashSet<string> PayloadResident = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { SealFile, "receipt.txt", KeyCacheFile };
+        // (1.11.0) a fingerprinted payload's parts, part1.seal .. partN.seal, also resident
+        static readonly Regex PartFile = new Regex(@"^part\d{1,2}\.seal\z", RegexOptions.IgnoreCase);
+
+        /// <summary>(1.11.0) N for a fingerprinted payload's receipt (parts=N: the account's variant of
+        /// each of N parts), 0 for one whole package.</summary>
+        static int PartsOf(Dictionary<string, string> f) =>
+            f.TryGetValue("parts", out var n) && int.TryParse(n, out var k) && k >= 1 && k <= 64 ? k : 0;
+
+        static List<string> SealNames(int parts) =>
+            parts == 0 ? new List<string> { SealFile } : Enumerable.Range(1, parts).Select(i => "part" + i + ".seal").ToList();
+
+        /// <summary>The hash a receipt signs for these pieces: of the one package, or (parts) of the
+        /// pieces' SHA-256 (hex) joined in order.</summary>
+        static string JoinedHash(List<byte[]> pieces, int parts) =>
+            parts == 0 ? Sha256Bytes(pieces[0]) : Utf8Sha256(string.Concat(pieces.Select(Sha256Bytes)));
+
+        /// <summary>Every piece decrypted and joined, when the plaintext is what plain_hash signs; else null.</summary>
+        static byte[] OpenPieces(byte[] key, List<byte[]> pieces, int parts, string plainHash)
+        {
+            var plains = new List<byte[]>();
+            foreach (var p in pieces)
+            {
+                var plain = DecryptSeal(key, p);
+                if (plain == null) return null;
+                plains.Add(plain);
+            }
+            if (JoinedHash(plains, parts) != plainHash) return null;
+            var all = new byte[plains.Sum(p => p.Length)];
+            int at = 0;
+            foreach (var p in plains) { Buffer.BlockCopy(p, 0, all, at, p.Length); at += p.Length; Array.Clear(p, 0, p.Length); }
+            return all;
+        }
+
+        /// <summary>The resident pieces the receipt names (null when one is missing).</summary>
+        static List<byte[]> ReadPieces(string dir, int parts)
+        {
+            var list = new List<byte[]>();
+            foreach (var name in SealNames(parts))
+            {
+                var path = Path.Combine(dir, name);
+                if (!File.Exists(path)) return null;
+                list.Add(File.ReadAllBytes(path));
+            }
+            return list;
+        }
         // a separate DPAPI label from the segments' key cache: neither ever opens the other's record
         static readonly byte[] PayloadEntropy = Encoding.ASCII.GetBytes("hd2qd-license-payload-1");
         /// <summary>The largest sealed package taken (the issuer's R2 object; Super Callouts' is ~20 MB).</summary>
@@ -89,6 +134,7 @@ namespace Hd2Qd.License
                 if (!f.TryGetValue(h, out var v) || !Regex.IsMatch(v, "^[0-9a-f]{64}\\z")) return null;
             if (!f.TryGetValue("issued", out var issued) || !long.TryParse(issued, out _)
                 || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)) return null;
+            if (f.ContainsKey("parts") && PartsOf(f) == 0) return null;       // (1.11.0) a parts= line, but no count
             var modulus = Bytes(key);
             if (!Regex.IsMatch(sig, "^[0-9a-fA-F]+$") || sig.Length != modulus.Length * 2) return null;
             using (var rsa = new RSACng())
@@ -114,26 +160,24 @@ namespace Hd2Qd.License
             try
             {
                 var receipt = new FileInfo(Path.Combine(dir, "receipt.txt"));
-                var seal = new FileInfo(Path.Combine(dir, SealFile));
-                if (!receipt.Exists || !seal.Exists) return null;
+                if (!receipt.Exists) return null;
                 // the rows ask on every redraw: 20 MB is hashed again only when a file changed
-                var stamp = key + "|" + receipt.LastWriteTimeUtc.Ticks + ":" + receipt.Length + "|" + seal.LastWriteTimeUtc.Ticks + ":" + seal.Length;
+                // (the package, or since 1.11.0 a fingerprinted payload's parts)
+                var stamp = new StringBuilder(key).Append('|').Append(receipt.LastWriteTimeUtc.Ticks).Append(':').Append(receipt.Length);
+                foreach (var fi in new DirectoryInfo(dir).GetFiles().Where(x => x.Name == SealFile || PartFile.IsMatch(x.Name)).OrderBy(x => x.Name, StringComparer.Ordinal))
+                    stamp.Append('|').Append(fi.Name).Append(':').Append(fi.LastWriteTimeUtc.Ticks).Append(':').Append(fi.Length);
                 lock (heldCache)
-                    if (heldCache.TryGetValue(dir, out var c) && c.Stamp == stamp) return c.Account;
+                    if (heldCache.TryGetValue(dir, out var c) && c.Stamp == stamp.ToString()) return c.Account;
                 var f = VerifyPayloadReceipt(File.ReadAllText(receipt.FullName), issuer, key);
                 string account = null;
-                if (f != null && f.TryGetValue("id", out var rid) && rid == Json.Str(pay, "wire")
-                    && f["sealed_hash"] == FileSha256(seal.FullName) && f.TryGetValue("account", out var a)) account = a;
-                lock (heldCache) heldCache[dir] = (stamp, account);
+                var pieces = f == null ? null : ReadPieces(dir, PartsOf(f));
+                if (f != null && pieces != null && f.TryGetValue("id", out var rid) && rid == Json.Str(pay, "wire")
+                    && f["sealed_hash"] == JoinedHash(pieces, PartsOf(f)) && f.TryGetValue("account", out var a)) account = a;
+                var stampText = stamp.ToString();
+                lock (heldCache) heldCache[dir] = (stampText, account);
                 return account;
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException || e is FormatException) { return null; }
-        }
-
-        static string FileSha256(string path)
-        {
-            using (var sha = SHA256.Create())
-            using (var s = File.OpenRead(path)) return Hex(sha.ComputeHash(s));
         }
 
         static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> lastPayload =
@@ -191,7 +235,7 @@ namespace Hd2Qd.License
                     var got = FetchPayload(home, decl, pay, account, token, true);
                     if (got.Error == "payload_pending" || got.Error == "network") return Err(got.Error);
                     if (got.Error != null) { error = error ?? got.Error; continue; }
-                    WritePayload(appData, Json.Str(decl, "issuer"), pay, got.Sealed, got.Receipt);
+                    WritePayload(appData, Json.Str(decl, "issuer"), pay, got.Sealed, got.Receipt, PartsOf(got.Fields));
                     CachePayloadKey(appData, Json.Str(decl, "issuer"), pay, got.Key, account, got.Receipt);
                     Array.Clear(got.Key, 0, got.Key.Length);
                     return new Dictionary<string, object> { ["claimed"] = true, ["account"] = account };
@@ -203,16 +247,20 @@ namespace Hd2Qd.License
         {
             public string Error, Receipt;
             public Dictionary<string, string> Fields;
-            public byte[] Key, Sealed;
+            public byte[] Key;
+            /// <summary>The sealed bytes: one package, or (1.11.0) the account's parts in order.</summary>
+            public List<byte[]> Sealed;
         }
 
         /// <summary>POST /payload for one account and token; with download, also the sealed bytes,
         /// checked against the receipt and decrypted once to prove key and plaintext. Error: the
-        /// issuer's refusal, "payload_pending", "network", "bad_receipt".</summary>
+        /// issuer's refusal, "payload_pending", "network", "bad_receipt". (1.11.0) The request says
+        /// parts=1: this plugin puts a fingerprinted payload's parts together (an older one is told
+        /// to update); the answer then lists the parts, {url, hash} each, instead of one url.</summary>
         static Fetched FetchPayload(string home, Dictionary<string, object> decl, Dictionary<string, object> pay, string account, string token, bool download)
         {
             string issuer = Json.Str(decl, "issuer"), wire = Json.Str(pay, "wire");
-            var (status, body) = Post(home, issuer, "/payload", new Dictionary<string, object> { ["id"] = wire, ["account"] = account, ["renew"] = token });
+            var (status, body) = Post(home, issuer, "/payload", new Dictionary<string, object> { ["id"] = wire, ["account"] = account, ["renew"] = token, ["parts"] = 1 });
             if (status == 409) return new Fetched { Error = Json.Str(body, "error") ?? "payload_pending" };
             if (status == 403 || status == 404) return new Fetched { Error = Json.Str(body, "error") ?? "unknown" };
             if (status != 200) return new Fetched { Error = "network" };
@@ -220,28 +268,50 @@ namespace Hd2Qd.License
             var f = VerifyPayloadReceipt(receipt, issuer, Json.Str(decl, "key"));
             var keyHex = Json.Str(body, "key") ?? "";
             if (f == null || !f.TryGetValue("id", out var rid) || rid != wire || !f.TryGetValue("account", out var ra) || ra != account
-                || Json.Str(body, "hash") != f["sealed_hash"] || !Regex.IsMatch(keyHex, "^[0-9a-f]{64}\\z"))
+                || !Regex.IsMatch(keyHex, "^[0-9a-f]{64}\\z"))
                 return new Fetched { Error = "bad_receipt" };
+            // what to download: one url and its hash, or the parts the receipt counts, whose hashes
+            // joined in order are the signed sealed_hash
+            int parts = PartsOf(f);
+            var links = new List<(string Url, string Hash)>();
+            if (parts == 0)
+            {
+                if (Json.Str(body, "hash") != f["sealed_hash"]) return new Fetched { Error = "bad_receipt" };
+                links.Add((Json.Str(body, "url") ?? "", f["sealed_hash"]));
+            }
+            else
+            {
+                var list = (Json.List(body, "parts") ?? new List<object>()).OfType<Dictionary<string, object>>().ToList();
+                if (list.Count != parts) return new Fetched { Error = "bad_receipt" };
+                foreach (var p in list) links.Add((Json.Str(p, "url") ?? "", Json.Str(p, "hash") ?? ""));
+                if (links.Any(l => !Regex.IsMatch(l.Hash, "^[0-9a-f]{64}\\z")) || Utf8Sha256(string.Concat(links.Select(l => l.Hash))) != f["sealed_hash"])
+                    return new Fetched { Error = "bad_receipt" };
+            }
             var key = Bytes(keyHex);
             if (Sha256Bytes(key) != f["key_hash"]) return new Fetched { Error = "bad_receipt" };
             var got = new Fetched { Receipt = receipt.Replace("\r", ""), Fields = f, Key = key };
             if (!download) return got;
 
-            // the link comes from the issuer itself (same scheme and host), never another site
-            var url = Json.Str(body, "url") ?? "";
-            if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
-            byte[] bytes;
-            try { bytes = GetBytes(home, issuer, url); }
-            catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException || e is InvalidDataException)
+            var pieces = new List<byte[]>();
+            foreach (var (url, hash) in links)
             {
-                Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
-                return new Fetched { Error = "network" };
+                // the link comes from the issuer itself (same scheme and host), never another site
+                if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
+                byte[] bytes;
+                try { bytes = GetBytes(home, issuer, url); }
+                catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException || e is InvalidDataException)
+                {
+                    Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
+                    return new Fetched { Error = "network" };
+                }
+                if (bytes == null) return new Fetched { Error = "network" };
+                if (Sha256Bytes(bytes) != hash) return new Fetched { Error = "bad_receipt" };
+                pieces.Add(bytes);
             }
-            if (bytes == null) return new Fetched { Error = "network" };
-            if (Sha256Bytes(bytes) != f["sealed_hash"]) return new Fetched { Error = "bad_receipt" };
-            var plain = DecryptSeal(key, bytes);
-            if (plain == null || Sha256Bytes(plain) != f["plain_hash"]) return new Fetched { Error = "bad_receipt" };
-            got.Sealed = bytes;
+            var plain = OpenPieces(key, pieces, parts, f["plain_hash"]);
+            if (plain == null) return new Fetched { Error = "bad_receipt" };
+            Array.Clear(plain, 0, plain.Length);
+            got.Sealed = pieces;
             return got;
         }
 
@@ -288,7 +358,7 @@ namespace Hd2Qd.License
 
         /// <summary>The package and its receipt, written whole into a new folder beside the version's,
         /// then moved into place (an older package and its key cache go with the old folder).</summary>
-        static void WritePayload(string appData, string issuer, Dictionary<string, object> pay, byte[] sealedBytes, string receipt)
+        static void WritePayload(string appData, string issuer, Dictionary<string, object> pay, List<byte[]> pieces, string receipt, int parts)
         {
             var dir = PayloadFolder(appData, issuer, pay);
             var root = Path.GetDirectoryName(dir);
@@ -296,7 +366,8 @@ namespace Hd2Qd.License
             Directory.CreateDirectory(root);
             var tmp = Path.Combine(root, "." + name + ".new-" + Hex(Random(4)));
             Directory.CreateDirectory(tmp);
-            File.WriteAllBytes(Path.Combine(tmp, SealFile), sealedBytes);
+            var names = SealNames(parts);
+            for (int i = 0; i < pieces.Count; i++) File.WriteAllBytes(Path.Combine(tmp, names[i]), pieces[i]);
             File.WriteAllText(Path.Combine(tmp, "receipt.txt"), receipt, new UTF8Encoding(false));
             string old = null;
             if (Directory.Exists(dir))
@@ -475,7 +546,7 @@ namespace Hd2Qd.License
                 {
                     got = FetchPayload(home, decl, pay, account, token, true);
                     if (got.Error != null) continue;
-                    WritePayload(appData, issuer, pay, got.Sealed, got.Receipt);
+                    WritePayload(appData, issuer, pay, got.Sealed, got.Receipt, PartsOf(got.Fields));
                     Log(home, issuer, "payload " + Json.Str(pay, "wire") + ": the author replaced the package; downloaded again");
                 }
                 else File.WriteAllText(Path.Combine(dir, "receipt.txt"), got.Receipt, new UTF8Encoding(false));
@@ -496,10 +567,11 @@ namespace Hd2Qd.License
             var dir = PayloadFolder(appData, issuer, pay);
             var f = VerifyPayloadReceipt(File.ReadAllText(Path.Combine(dir, "receipt.txt")), issuer, Json.Str(decl, "key"));
             if (f == null) return false;
-            var sealedBytes = File.ReadAllBytes(Path.Combine(dir, SealFile));
-            if (Sha256Bytes(sealedBytes) != f["sealed_hash"]) return false;
-            var plain = DecryptSeal(key, sealedBytes);
-            if (plain == null || Sha256Bytes(plain) != f["plain_hash"]) return false;     // wrong key or tampered: fail closed
+            int parts = PartsOf(f);
+            var pieces = ReadPieces(dir, parts);
+            if (pieces == null || JoinedHash(pieces, parts) != f["sealed_hash"]) return false;
+            var plain = OpenPieces(key, pieces, parts, f["plain_hash"]);
+            if (plain == null) return false;     // wrong key or tampered: fail closed
             var target = Path.Combine(dir, Json.Str(pay, "file"));
             var tmp = target + ".new-" + Hex(Random(4));
             File.WriteAllBytes(tmp, plain);
@@ -524,7 +596,7 @@ namespace Hd2Qd.License
                             try
                             {
                                 foreach (var file in Directory.GetFiles(ver))
-                                    if (!PayloadResident.Contains(Path.GetFileName(file))) File.Delete(file);
+                                    if (!PayloadResident.Contains(Path.GetFileName(file)) && !PartFile.IsMatch(Path.GetFileName(file))) File.Delete(file);
                             }
                             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
                         }
