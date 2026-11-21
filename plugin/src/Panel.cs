@@ -99,7 +99,7 @@ namespace Hd2Qd.License
                         Refresh(host);
                     }));
                 // (1.6.0) the member content of this author's mods that ship it per game account
-                bool segmentsMissing = false, anySealed = false, anyContent = false;
+                bool segmentsMissing = false, anySealed = false;
                 if (state == "licensed")
                     foreach (var m in LibraryOf(host))
                     {
@@ -113,14 +113,11 @@ namespace Hd2Qd.License
                         var label = Json.Str(m, "name");
                         segmentsMissing |= st != "claimed" && st != "downloading";     // (1.11.1) no button while it downloads
                         anySealed |= UnlockedPerSession(path);
-                        anyContent = true;
                         // (1.11.4) a download in progress says how far it is, and keeps saying it
                         if (st == "downloading") card.Live[about.Count] = (path, label, lang);
                         about.Add(st == "downloading" ? DownloadingWords(path, label, lang) : SegmentsWords(st, label, lang));
                     }
-                // (1.11.4) players looked in the mod's folder, found no member content there and took
-                // the download for a failure (the user, 2026-11-21): where it is, said once
-                if (anyContent) about.Add(Words.Get(lang, "seg_where"));
+
                 // a sealed (C1) mod is unlocked only while this program runs when the game starts:
                 // a manager older than 0.22.0 ends when its window closes, and then the mod does
                 // nothing in that game with no word why (2026-11-19)
