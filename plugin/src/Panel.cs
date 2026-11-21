@@ -130,7 +130,7 @@ namespace Hd2Qd.License
                         try { st = SegmentsState(home, appData, path); }
                         catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException) { st = "other"; }
                         var label = Json.Str(m, "name");
-                        segmentsMissing |= st != "claimed";
+                        segmentsMissing |= st != "claimed" && st != "downloading";     // (1.11.1) no button while it downloads
                         anySealed |= UnlockedPerSession(path);
                         about.Add(SegmentsWords(st, label, lang));
                     }
@@ -345,7 +345,7 @@ namespace Hd2Qd.License
         {
             switch (st)
             {
-                case "claimed": case "missing": case "pending": case "not_signed_in": case "no_version":
+                case "claimed": case "missing": case "pending": case "not_signed_in": case "no_version": case "downloading":
                     return Words.F(lang, "seg_" + st, mod);
                 case "bad_receipt": case "account": case "not_member": case "banned": case "network":
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_" + st));

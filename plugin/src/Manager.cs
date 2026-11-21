@@ -119,7 +119,8 @@ namespace Hd2Qd.License
             if (seg == "missing") ClaimLater(host, modFolder, SegmentsOf(modFolder));
             return new Dictionary<string, object>
             {
-                ["text"] = Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending" : "row_segments"),
+                ["text"] = Words.Get(lang, seg == "pending" || seg == "payload_pending" ? "row_segments_pending"
+                                           : seg == "downloading" ? "row_segments_downloading" : "row_segments"),
                 ["tip"] = Words.Get(lang, "row_segments_tip"),
                 ["colour"] = "Yellow",
             };
@@ -322,6 +323,7 @@ namespace Hd2Qd.License
             {
                 case "claimed": return "member content ready";
                 case "missing": return "not downloaded yet";
+                case "downloading": return "downloading now";
                 case "pending": case "payload_pending": return "the author has not published this version's member content yet";
                 case "not_signed_in": return "sign in first (license-login)";
                 case "no_version": return "no vX.Y.Z in the mod's manifest.json Name";

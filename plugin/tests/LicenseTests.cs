@@ -38,6 +38,7 @@ namespace Hd2Qd.License.Tests
         public void Dispose()
         {
             issuer.Dispose();
+            Plugin.StopRetrying();
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             try { Directory.Delete(Root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
@@ -991,6 +992,51 @@ namespace Hd2Qd.License.Tests
             Assert.False(File.Exists(Path.Combine(dir, "clips.lua")));
         }
 
+        // -- (1.11.1) the card while member content downloads, and a version still to be published ----
+
+        [Fact]
+        public void A_download_reads_downloading_and_the_window_is_redrawn_before_and_after()
+        {
+            Account(A);
+            var mod = PayloadMod();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            string during = null;
+            issuer.OnBlob = () => during = during ?? Plugin.SegmentsState(Home, appData, mod);
+            int redraws = 0;
+            var host = Host();
+            host["refresh"] = (Action)(() => redraws++);
+            Assert.True(Plugin.ClaimAll(host));
+            Assert.Equal("downloading", during);
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(redraws >= 2, "redrawn when the download starts and when it ends (" + redraws + ")");
+            redraws = 0;
+            Assert.False(Plugin.ClaimAll(host));
+            Assert.Equal(0, redraws);                       // nothing to fetch: no redraw, no "downloading"
+            var note = Plugin.ModNote(mod, host);
+            Assert.True(note == null || Json.Str(note, "text") != "Downloading member content…");
+        }
+
+        [Fact]
+        public void A_version_still_to_be_published_is_asked_for_again_until_it_is_there()
+        {
+            Account(A);
+            var mod = PayloadMod();
+            InLibrary("Payload", mod);
+            Assert.Equal("ok", SignIn(mod));
+            issuer.PayloadError = "payload_pending";
+            Plugin.ClaimAll(Host());
+            Assert.Equal("pending", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(Plugin.RetryingPending, "a version waiting for its author keeps a retry going");
+            Plugin.RetryPending();
+            Assert.Equal("pending", Plugin.SegmentsState(Home, appData, mod));
+            Assert.True(Plugin.RetryingPending);
+            issuer.PayloadError = null;                     // the author publishes it
+            Plugin.RetryPending();
+            Assert.Equal("claimed", Plugin.SegmentsState(Home, appData, mod));
+            Assert.False(Plugin.RetryingPending, "nothing waits any more: the timer is gone");
+        }
+
         [Fact]
         public void Payload_versions_no_library_mod_uses_are_removed()
         {
@@ -1452,7 +1498,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.0", Plugin.PluginVersion);
+            Assert.Equal("1.11.1", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1472,7 +1518,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.0\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.1\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1680,6 +1726,8 @@ namespace Hd2Qd.License.Tests
                 new Dictionary<string, (byte[], byte[], byte[], string)>();
             public string PayloadSpoil, PayloadError;
             public int PayloadCalls, BlobCalls;
+            /// <summary>(1.11.1) Called on each blob download, while the plugin waits for it.</summary>
+            public Action OnBlob;
             public long PayloadGrace = 20 * 86400;
             public bool LastSegmentsPayload;
 
@@ -2079,6 +2127,7 @@ namespace Hd2Qd.License.Tests
                         {
                             // (1.10.0) the sealed bytes, by mark, as R2 streams them
                             BlobCalls++;
+                            OnBlob?.Invoke();
                             var mark = path.Split('&').First(x => x.StartsWith("mark=")).Substring(5);
                             var pkg = Payloads.Values.FirstOrDefault(x => x.Mark == mark);
                             byte[] blob = pkg.Sealed?.ToArray() ?? new byte[0];

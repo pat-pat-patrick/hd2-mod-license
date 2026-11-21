@@ -317,6 +317,101 @@ namespace Hd2Qd.License
         /// good set; then the versions no longer used are removed. True when one was claimed.</summary>
         public static bool ClaimAll(Dictionary<string, object> host, bool force = false)
         {
+            // (1.11.1) the mods about to be fetched read "downloading" on their row and the card until
+            // it is done, and the window is redrawn before and after: the card used to say "not
+            // downloaded yet" all through a download, and after the one at the manager's start until
+            // the page was drawn again (the user, 2026-11-21: "不给一个进度啊？")
+            string home = Home(host), appData = AppData(host);
+            var marked = new List<string>();
+            foreach (var m in LibraryOf(host))
+            {
+                var path = Json.Str(m, "path");
+                if (path == null || !Directory.Exists(path) || !HasMemberContent(path)) continue;
+                string st;
+                try { st = SegmentsState(home, appData, path); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { continue; }
+                if (st == "not_signed_in" || st == "bad_declaration" || st == "update_manager" || st == "no_version") continue;
+                if (st == "claimed" && !force) continue;
+                if (downloading.TryAdd(path, 0)) marked.Add(path);
+            }
+            if (marked.Count > 0) RefreshFromWorker(host);
+            try { return ClaimAllOnce(host, force); }
+            finally
+            {
+                foreach (var path in marked) downloading.TryRemove(path, out _);
+                if (marked.Count > 0) RefreshFromWorker(host);
+                SchedulePendingRetry(host);
+            }
+        }
+
+        /// <summary>(1.11.1) The mods whose member content is being fetched now.</summary>
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> downloading =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        // -- (1.11.1) a version the author has not published yet: asked again while it waits --------
+
+        /// <summary>How often a waiting ("pending") version is asked for again while the manager runs.
+        /// Tests set it.</summary>
+        public static int PendingRetrySeconds = 120;
+        static System.Threading.Timer pendingTimer;
+        static Dictionary<string, object> pendingHost;
+        static readonly object pendingLock = new object();
+        static int pendingBusy;
+
+        /// <summary>One timer while some library mod waits for its author to publish, none otherwise:
+        /// it asked only at the manager's next start before, so content published meanwhile stayed
+        /// "waiting" until a restart or the card's button (2026-11-21).</summary>
+        static void SchedulePendingRetry(Dictionary<string, object> host)
+        {
+            bool waiting = false;
+            try
+            {
+                foreach (var m in LibraryOf(host))
+                {
+                    var path = Json.Str(m, "path");
+                    if (path != null && Directory.Exists(path) && HasMemberContent(path) && SegmentsState(Home(host), AppData(host), path) == "pending")
+                    { waiting = true; break; }
+                }
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+            lock (pendingLock)
+            {
+                if (waiting)
+                {
+                    pendingHost = host;
+                    if (pendingTimer == null)
+                        pendingTimer = new System.Threading.Timer(_ => RetryPending(), null, PendingRetrySeconds * 1000, PendingRetrySeconds * 1000);
+                }
+                else if (pendingTimer != null)
+                {
+                    pendingTimer.Dispose();
+                    pendingTimer = null;
+                }
+            }
+        }
+
+        /// <summary>The timer's tick (and the tests'): every library mod's member content fetched again
+        /// where it is missing; the timer goes when nothing waits any more.</summary>
+        public static void RetryPending()
+        {
+            var host = pendingHost;
+            if (host == null || Interlocked.Exchange(ref pendingBusy, 1) == 1) return;
+            try { ClaimAll(host); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException) { }
+            finally { Interlocked.Exchange(ref pendingBusy, 0); }
+        }
+
+        /// <summary>Whether a retry timer runs now (tests).</summary>
+        public static bool RetryingPending { get { lock (pendingLock) return pendingTimer != null; } }
+
+        /// <summary>Stops the retry timer (tests, between hosts).</summary>
+        public static void StopRetrying()
+        {
+            lock (pendingLock) { pendingTimer?.Dispose(); pendingTimer = null; pendingHost = null; }
+        }
+
+        static bool ClaimAllOnce(Dictionary<string, object> host, bool force)
+        {
             bool any = false;
             string home = Home(host), appData = AppData(host);
             var library = LibraryOf(host);
@@ -380,6 +475,8 @@ namespace Hd2Qd.License
         /// "not_signed_in", "missing" (not claimed yet), or the last claim's error.</summary>
         public static string SegmentsState(string home, string appData, string modFolder)
         {
+            // (1.11.1) being fetched right now
+            if (downloading.ContainsKey(modFolder)) return "downloading";
             // (1.10.0) a mod's member content is its segments and its payload: "claimed" only when
             // every part it declares is held here, else what the first missing part says
             var segState = SegmentsOnlyState(appData, modFolder);
