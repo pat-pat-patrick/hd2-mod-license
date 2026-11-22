@@ -132,7 +132,7 @@ namespace Hd2Qd.License.Tests
             var big = Path.Combine(folder, "opt", "A", "9ba626afa44a3aa3.patch_0");
             var stamp = File.GetLastWriteTimeUtc(big);
             System.Threading.Thread.Sleep(20);
-            Assert.False(Plugin.PrepareDeploy(host));
+            Assert.True(Plugin.PrepareDeploy(host));                 // ready already: nothing written
             Assert.Equal(stamp, File.GetLastWriteTimeUtc(big));
             Assert.Equal(folder, Json.Str(Plugin.ModSource(pack.Folder, host), "folder"));
         }
@@ -204,7 +204,8 @@ namespace Hd2Qd.License.Tests
         public void A_session_package_is_staged_only_for_a_session_and_ends_with_it()
         {
             var pack = SignedInPack(mode: "session");
-            Assert.False(Plugin.PrepareDeploy(StageHost(forSession: false)));
+            Assert.True(Plugin.PrepareDeploy(StageHost(forSession: false)));     // not asked for: nothing to fail
+            Assert.False(Directory.Exists(Stage));
             var host = StageHost(forSession: true);
             Assert.Equal("session", Json.Str(Plugin.ModSource(pack.Folder, host), "mode"));
             Assert.Equal("", Json.Str(Plugin.ModSource(pack.Folder, host), "folder"));

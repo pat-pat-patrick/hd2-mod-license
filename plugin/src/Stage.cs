@@ -175,13 +175,15 @@ namespace Hd2Qd.License
         /// starting a game) Stages every enabled library mod's protected game package that is not
         /// staged yet: its key from the cache within the receipt's grace, else from the issuer;
         /// the account's fingerprinted files from the package fetched for it. host["for_session"]:
-        /// also the session-mode mods (else only "deploy" ones). True when anything was written.</summary>
+        /// also the session-mode mods (else only "deploy" ones). True when every one of them is
+        /// ready (staged now or before); false when one could not be (why is in the log). The
+        /// manager reads false as "a plugin could not make every protected mod ready".</summary>
         public static bool PrepareDeploy(Dictionary<string, object> host)
         {
             var root = StageRoot(host);
             if (root == null) return false;
             bool forSession = host.TryGetValue("for_session", out var fs) && fs is bool b && b;
-            bool any = false;
+            bool ok = true;
             foreach (var m in LibraryOf(host))
             {
                 var path = Json.Str(m, "path");
@@ -189,11 +191,14 @@ namespace Hd2Qd.License
                 var pay = PayloadOf(path);
                 if (pay == null || !GameForm(pay)) continue;
                 if (Json.Str(pay, "mode") == "session" && !forSession) continue;
-                try { lock (stageLock) any |= StageMod(host, path); }
+                try { lock (stageLock) ok &= StageMod(host, path); }
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException)
-                { Log(Home(host), IssuerOf(path), PayLabel(path, pay) + ": staging failed: " + e.GetType().Name + " " + e.Message); }
+                {
+                    ok = false;
+                    Log(Home(host), IssuerOf(path), PayLabel(path, pay) + ": staging failed: " + e.GetType().Name + " " + e.Message);
+                }
             }
-            return any;
+            return ok;
         }
 
         /// <summary>(1.12.0, the manager's call, after it deployed without the session-mode mods)
@@ -221,7 +226,8 @@ namespace Hd2Qd.License
 
         // ------------------------------------------------------------ staging
 
-        /// <summary>Stages one mod. False when it already was, or could not be (logged).</summary>
+        /// <summary>Stages one mod: true when it is ready (now or before), false when it could not
+        /// be (logged).</summary>
         static bool StageMod(Dictionary<string, object> host, string modFolder)
         {
             string home = Home(host), appData = AppData(host), root = StageRoot(host);
@@ -250,7 +256,7 @@ namespace Hd2Qd.License
             }
             string mark = f.TryGetValue("mark", out var mk) ? mk : "";
             var ready = ReadyOf(dir);
-            if (ready != null && Json.Str(ready, "base") == m.Base && Json.Str(ready, "mark") == mark && AllThere(dir, m)) return false;
+            if (ready != null && Json.Str(ready, "base") == m.Base && Json.Str(ready, "mark") == mark && AllThere(dir, m)) return true;
 
             byte[] key = CachedPayloadKey(home, appData, issuer, pay, held, f["sealed_hash"]) ?? PayloadSessionKey(home, appData, decl, pay, held);
             if (key == null) { Log(home, issuer, label + ": not staged (no key: offline past grace, or another computer)"); return false; }
