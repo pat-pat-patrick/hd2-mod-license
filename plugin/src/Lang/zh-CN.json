@@ -81,5 +81,12 @@
   "lic_send_log_done_nocopy": "日志已发送，编号为 {0}。向作者说明问题时请附上此编号，作者凭它查看日志（{1} 天内有效）。此编号不是激活码，不能用于授权。",
   "lic_send_log_rate": "今日发送次数已达上限，请明天再试。",
   "lic_send_log_no_diag": "该作者的网站暂不接收日志。",
-  "lic_send_log_empty": "本机尚无该作者的日志。"
+  "lic_send_log_empty": "本机尚无该作者的日志。",
+  "stage_not_ready": "会员内容尚未解开，部署前会自动处理。",
+  "stage_session": "此 MOD 仅在从管理器启动游戏时加载。",
+  "stage_no_game": "尚未设置游戏目录。",
+  "stage_bad_package": "此 MOD 的受保护文件不完整或与声明不符，请重新下载此 MOD。",
+  "stage_bad_declaration": "无法读取此 MOD 的授权声明（hd2_license.json）。",
+  "row_stage_update_manager": "需要更新管理器",
+  "row_stage_update_manager_tip": "此 MOD 的会员内容需要更新版本的 HD2 Mod Quick Deploy 才能部署。"
 }

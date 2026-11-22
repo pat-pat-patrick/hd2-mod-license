@@ -101,6 +101,10 @@ namespace Hd2Qd.License
             try { seg = SegmentsState(Home(host), AppData(host), modFolder); }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { return null; }
             string lang = Words.Lang(host);
+            // (1.12.0) a protected game package needs a manager that deploys from this plugin's
+            // stage folder (it passes host["stage"]); an older one deploys nothing of it
+            if (PayloadOf(modFolder) is Dictionary<string, object> pay && GameForm(pay) && !host.ContainsKey("stage"))
+                return new Dictionary<string, object> { ["text"] = Words.Get(lang, "row_stage_update_manager"), ["tip"] = Words.Get(lang, "row_stage_update_manager_tip"), ["colour"] = "Yellow" };
             if (seg == "claimed")
             {
                 // a sealed (C1) mod held here: a word only when its content was, or will be, left

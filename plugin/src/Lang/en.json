@@ -81,5 +81,12 @@
   "lic_send_log_done_nocopy": "The log has been sent; its reference is {0}. Include it when you describe the problem to the author, who uses it to read the log (valid for {1} days). It is not an activation code and does not grant a license.",
   "lic_send_log_rate": "The daily limit for sending logs has been reached. Try again tomorrow.",
   "lic_send_log_no_diag": "This author's site does not accept logs yet.",
-  "lic_send_log_empty": "This computer has no log for this author yet."
+  "lic_send_log_empty": "This computer has no log for this author yet.",
+  "stage_not_ready": "The member content has not been unlocked yet; this is done automatically before deploying.",
+  "stage_session": "This mod loads only when the game is started from the manager.",
+  "stage_no_game": "The game folder has not been set.",
+  "stage_bad_package": "This mod's protected files are incomplete or do not match its declaration. Download the mod again.",
+  "stage_bad_declaration": "This mod's license declaration (hd2_license.json) cannot be read.",
+  "row_stage_update_manager": "Manager update needed",
+  "row_stage_update_manager_tip": "This mod's member content needs a newer version of HD2 Mod Quick Deploy to be deployed."
 }

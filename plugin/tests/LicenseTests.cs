@@ -16,7 +16,7 @@ namespace Hd2Qd.License.Tests
 {
     /// <summary>The license plugin, called as the manager calls it, against an issuer on this
     /// computer that answers as the protocol says.</summary>
-    public class LicensePlugin : IDisposable
+    public partial class LicensePlugin : IDisposable
     {
         const string A = "9ba626afa44a3aa3", B = "20bdec2a51065e1f";
         readonly string Root = Path.Combine(Path.GetTempPath(), "hd2lic_" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -1732,7 +1732,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.11.5", Plugin.PluginVersion);
+            Assert.Equal("1.12.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1752,7 +1752,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.11.5\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.12.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1995,10 +1995,11 @@ namespace Hd2Qd.License.Tests
 
             /// <summary>A RECEIPT 2 (spec/static-resources draft 2), its lines in order; parts=N after
             /// mark for a fingerprinted payload (1.11.0).</summary>
-            public string PayloadReceipt(string wire, string account, string mark, string sealedHash, string plainHash, string keyHash, long issued, long grace, string signWith = "a", int parts = 0)
+            public string PayloadReceipt(string wire, string account, string mark, string sealedHash, string plainHash, string keyHash, long issued, long grace, string signWith = "a", int parts = 0, string baseHash = null)
             {
                 var text = "HD2 PAYLOAD RECEIPT 2" + NL + "issuer=" + Name + NL + "account=" + account + NL + "id=" + wire + NL + "mark=" + mark + NL +
-                           (parts > 0 ? "parts=" + parts + NL : "") +
+                           (parts > 0 || baseHash != null ? "parts=" + parts + NL : "") +
+                           (baseHash != null ? "base=" + baseHash + NL : "") +
                            "alg=A256CBC" + NL + "sealed_hash=" + sealedHash + NL + "plain_hash=" + plainHash + NL + "key_hash=" + keyHash + NL +
                            "issued=" + issued + NL + "expires=" + (issued + grace) + NL;
                 return Sign(signWith, text);
@@ -2010,10 +2011,17 @@ namespace Hd2Qd.License.Tests
                 new Dictionary<string, (byte[], byte[][][], byte[][][])>();
             public bool LastPayloadParts;
 
-            public void PublishParts(string wire, byte[][][] plain)
+            /// <summary>(1.12.0) A protected game package's manifest hash per wire id: its receipt then
+            /// says base= (and may count parts=0).</summary>
+            public readonly Dictionary<string, string> PartedBase = new Dictionary<string, string>();
+
+            public void PublishParts(string wire, byte[][][] plain, byte[] key = null)
             {
-                var key = new byte[32];
-                using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(key);
+                if (key == null)
+                {
+                    key = new byte[32];
+                    using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(key);
+                }
                 var sealedParts = plain.Select(row => row.Select(pt =>
                 {
                     using (var aes = Aes.Create())
@@ -2256,7 +2264,7 @@ namespace Hd2Qd.License.Tests
                     if (Parted.TryGetValue(wire ?? "", out var fp))
                     {
                         if (!LastPayloadParts) return (409, new Dictionary<string, object> { ["error"] = "update to 1.11.0" });
-                        int n = fp.Plain.Length, nv = fp.Plain[0].Length;
+                        int n = fp.Plain.Length, nv = n == 0 ? 1 : fp.Plain[0].Length;
                         var combo = ComboOf(acct, n, nv);
                         var list = new List<object>();
                         string sealedJoin = "", plainJoin = "";
@@ -2276,7 +2284,7 @@ namespace Hd2Qd.License.Tests
                         if (PayloadSpoil == "count") list.RemoveAt(list.Count - 1);
                         var mark = string.Concat(combo.Select(c => c.ToString("x")));
                         var rec = PayloadReceipt(wire, acct, mark, Utf8Sha(sealedJoin), PayloadSpoil == "plain" ? new string('e', 64) : Utf8Sha(plainJoin), Sha(fp.Key),
-                                                 DateTimeOffset.UtcNow.ToUnixTimeSeconds(), PayloadGrace, "a", n);
+                                                 DateTimeOffset.UtcNow.ToUnixTimeSeconds(), PayloadGrace, "a", n, PartedBase.TryGetValue(wire, out var bh) ? bh : null);
                         return (200, new Dictionary<string, object> { ["parts"] = list, ["key"] = Hex(fp.Key), ["receipt"] = rec });
                     }
                     if (!Payloads.TryGetValue(wire ?? "", out var p)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });

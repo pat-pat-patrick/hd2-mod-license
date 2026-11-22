@@ -34,20 +34,37 @@ namespace Hd2Qd.License
         static readonly Regex PartFile = new Regex(@"^part\d{1,2}\.seal\z", RegexOptions.IgnoreCase);
 
         /// <summary>(1.11.0) N for a fingerprinted payload's receipt (parts=N: the account's variant of
-        /// each of N parts), 0 for one whole package.</summary>
+        /// each of N parts), 0 for one whole package. (1.12.0) A protected game package may say
+        /// parts=0: its receipt then carries base= and no part is fetched (Joined tells the two apart).</summary>
         static int PartsOf(Dictionary<string, string> f) =>
-            f.TryGetValue("parts", out var n) && int.TryParse(n, out var k) && k >= 1 && k <= 64 ? k : 0;
+            f.TryGetValue("parts", out var n) && int.TryParse(n, out var k) && k >= 0 && k <= 64 ? k : 0;
 
-        static List<string> SealNames(int parts) =>
-            parts == 0 ? new List<string> { SealFile } : Enumerable.Range(1, parts).Select(i => "part" + i + ".seal").ToList();
+        /// <summary>(1.12.0) Whether a receipt counts parts (parts=N, N may be 0 with base=) rather
+        /// than naming one whole package.</summary>
+        static bool Joined(Dictionary<string, string> f) => f.ContainsKey("parts");
+
+        static List<string> SealNames(Dictionary<string, string> f) =>
+            !Joined(f) ? new List<string> { SealFile } : Enumerable.Range(1, PartsOf(f)).Select(i => "part" + i + ".seal").ToList();
 
         /// <summary>The hash a receipt signs for these pieces: of the one package, or (parts) of the
-        /// pieces' SHA-256 (hex) joined in order.</summary>
-        static string JoinedHash(List<byte[]> pieces, int parts) =>
-            parts == 0 ? Sha256Bytes(pieces[0]) : Utf8Sha256(string.Concat(pieces.Select(Sha256Bytes)));
+        /// pieces' SHA-256 (hex) joined in order (of the empty string for no parts).</summary>
+        static string JoinedHash(List<byte[]> pieces, Dictionary<string, string> f) =>
+            !Joined(f) ? Sha256Bytes(pieces[0]) : Utf8Sha256(string.Concat(pieces.Select(Sha256Bytes)));
 
         /// <summary>Every piece decrypted and joined, when the plaintext is what plain_hash signs; else null.</summary>
-        static byte[] OpenPieces(byte[] key, List<byte[]> pieces, int parts, string plainHash)
+        static byte[] OpenPieces(byte[] key, List<byte[]> pieces, Dictionary<string, string> f)
+        {
+            var plains = OpenEach(key, pieces, f);
+            if (plains == null) return null;
+            var all = new byte[plains.Sum(p => p.Length)];
+            int at = 0;
+            foreach (var p in plains) { Buffer.BlockCopy(p, 0, all, at, p.Length); at += p.Length; Array.Clear(p, 0, p.Length); }
+            return all;
+        }
+
+        /// <summary>(1.12.0) Every piece decrypted, kept apart (a protected game package writes each
+        /// part to its own file), when together they are what plain_hash signs; else null.</summary>
+        static List<byte[]> OpenEach(byte[] key, List<byte[]> pieces, Dictionary<string, string> f)
         {
             var plains = new List<byte[]>();
             foreach (var p in pieces)
@@ -56,18 +73,15 @@ namespace Hd2Qd.License
                 if (plain == null) return null;
                 plains.Add(plain);
             }
-            if (JoinedHash(plains, parts) != plainHash) return null;
-            var all = new byte[plains.Sum(p => p.Length)];
-            int at = 0;
-            foreach (var p in plains) { Buffer.BlockCopy(p, 0, all, at, p.Length); at += p.Length; Array.Clear(p, 0, p.Length); }
-            return all;
+            if (JoinedHash(plains, f) != f["plain_hash"]) return null;
+            return plains;
         }
 
         /// <summary>The resident pieces the receipt names (null when one is missing).</summary>
-        static List<byte[]> ReadPieces(string dir, int parts)
+        static List<byte[]> ReadPieces(string dir, Dictionary<string, string> f)
         {
             var list = new List<byte[]>();
-            foreach (var name in SealNames(parts))
+            foreach (var name in SealNames(f))
             {
                 var path = Path.Combine(dir, name);
                 if (!File.Exists(path)) return null;
@@ -107,10 +121,25 @@ namespace Hd2Qd.License
             }
             var wire = version == null ? id : id + "." + version;
             if (!PayloadId.IsMatch(wire)) return Err("bad_declaration");
-            var m = DeployLicenses.Match(Json.Str(p, "deploy") ?? "");
+            var deploy = Json.Str(p, "deploy") ?? "";
+            // (1.12.0) "game": a protected game package (Stage.cs). The mod ships its patch files
+            // sealed under protected/, the issuer gives the key and the account's fingerprinted
+            // files, and the manager deploys the plaintext this plugin stages for it. The author
+            // picks the mode: "deploy" (deployed as any mod) or "session" (only for a game the
+            // manager starts, removed when it ends).
+            if (deploy == "game")
+            {
+                var mode = p.ContainsKey("mode") ? Json.Str(p, "mode") : "deploy";
+                if (mode != "deploy" && mode != "session") return Err("bad_declaration");
+                return new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["wire"] = wire, ["form"] = "game", ["mode"] = mode };
+            }
+            var m = DeployLicenses.Match(deploy);
             if (!m.Success) return Err("update_manager");
-            return new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["wire"] = wire, ["file"] = m.Groups[1].Value };
+            return new Dictionary<string, object> { ["id"] = id, ["version"] = version, ["wire"] = wire, ["form"] = "licenses", ["file"] = m.Groups[1].Value };
         }
+
+        /// <summary>(1.12.0) Whether a payload is a protected game package (deploy "game").</summary>
+        static bool GameForm(Dictionary<string, object> pay) => Json.Str(pay, "form") == "game";
 
         static string PayloadRoot(string appData, string issuer, string id) =>
             Path.Combine(LicenseDir(appData), issuer.Replace(':', '_'), "payload", id);
@@ -134,7 +163,11 @@ namespace Hd2Qd.License
                 if (!f.TryGetValue(h, out var v) || !Regex.IsMatch(v, "^[0-9a-f]{64}\\z")) return null;
             if (!f.TryGetValue("issued", out var issued) || !long.TryParse(issued, out _)
                 || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)) return null;
-            if (f.ContainsKey("parts") && PartsOf(f) == 0) return null;       // (1.11.0) a parts= line, but no count
+            // (1.11.0) a parts= line must count 1-64; (1.12.0) or 0 for a protected game package,
+            // whose receipt names its sealed files' manifest in base=
+            if (f.ContainsKey("parts") && !Regex.IsMatch(f["parts"], "^(?:0|[1-9][0-9]?)\\z")) return null;
+            if (f.ContainsKey("parts") && (int.Parse(f["parts"]) > 64 || int.Parse(f["parts"]) == 0 && !f.ContainsKey("base"))) return null;
+            if (f.ContainsKey("base") && !Regex.IsMatch(f["base"], "^[0-9a-f]{64}\\z")) return null;
             var modulus = Bytes(key);
             if (!Regex.IsMatch(sig, "^[0-9a-fA-F]+$") || sig.Length != modulus.Length * 2) return null;
             using (var rsa = new RSACng())
@@ -170,9 +203,9 @@ namespace Hd2Qd.License
                     if (heldCache.TryGetValue(dir, out var c) && c.Stamp == stamp.ToString()) return c.Account;
                 var f = VerifyPayloadReceipt(File.ReadAllText(receipt.FullName), issuer, key);
                 string account = null;
-                var pieces = f == null ? null : ReadPieces(dir, PartsOf(f));
+                var pieces = f == null ? null : ReadPieces(dir, f);
                 if (f != null && pieces != null && f.TryGetValue("id", out var rid) && rid == Json.Str(pay, "wire")
-                    && f["sealed_hash"] == JoinedHash(pieces, PartsOf(f)) && f.TryGetValue("account", out var a)) account = a;
+                    && f["sealed_hash"] == JoinedHash(pieces, f) && f.TryGetValue("account", out var a)) account = a;
                 var stampText = stamp.ToString();
                 lock (heldCache) heldCache[dir] = (stampText, account);
                 return account;
@@ -236,7 +269,7 @@ namespace Hd2Qd.License
                     var got = FetchPayload(home, decl, pay, account, token, true, f => Progress(modFolder, f));
                     if (got.Error == "payload_pending" || got.Error == "network") return Err(got.Error);
                     if (got.Error != null) { error = error ?? got.Error; continue; }
-                    WritePayload(appData, Json.Str(decl, "issuer"), pay, got.Sealed, got.Receipt, PartsOf(got.Fields));
+                    WritePayload(appData, Json.Str(decl, "issuer"), pay, got.Sealed, got.Receipt, got.Fields);
                     CachePayloadKey(appData, Json.Str(decl, "issuer"), pay, got.Key, account, got.Receipt);
                     Array.Clear(got.Key, 0, got.Key.Length);
                     return new Dictionary<string, object> { ["claimed"] = true, ["account"] = account };
@@ -295,8 +328,9 @@ namespace Hd2Qd.License
             // what to download: one url and its hash, or the parts the receipt counts, whose hashes
             // joined in order are the signed sealed_hash
             int parts = PartsOf(f);
+            bool joined = Joined(f);
             var links = new List<(string Url, string Hash)>();
-            if (parts == 0)
+            if (!joined)
             {
                 if (Json.Str(body, "hash") != f["sealed_hash"]) return new Fetched { Error = "bad_receipt" };
                 links.Add((Json.Str(body, "url") ?? "", f["sealed_hash"]));
@@ -332,7 +366,7 @@ namespace Hd2Qd.License
                     catch (LinkExpired)
                     {
                         if (fresh++ >= 2) return new Fetched { Error = "network" };
-                        var again = FreshLinks(home, issuer, wire, account, token, parts);
+                        var again = FreshLinks(home, issuer, wire, account, token, joined);
                         // the same parts of the same signed receipt, only new links: else nothing
                         if (again == null || again.Count != links.Count || again.Where((l, n) => l.Hash != links[n].Hash).Any())
                             return new Fetched { Error = "network" };
@@ -355,7 +389,7 @@ namespace Hd2Qd.License
                 if (Sha256Bytes(bytes) != links[i].Hash) return new Fetched { Error = "bad_receipt" };
                 pieces.Add(bytes);
             }
-            var plain = OpenPieces(key, pieces, parts, f["plain_hash"]);
+            var plain = OpenPieces(key, pieces, f);
             if (plain == null) return new Fetched { Error = "bad_receipt" };
             Array.Clear(plain, 0, plain.Length);
             got.Sealed = pieces;
@@ -367,11 +401,11 @@ namespace Hd2Qd.License
 
         /// <summary>(1.11.3) New links for the same payload: /payload asked again. Null when it
         /// gives none; the caller keeps them only when their hashes are the ones already checked.</summary>
-        static List<(string Url, string Hash)> FreshLinks(string home, string issuer, string wire, string account, string token, int parts)
+        static List<(string Url, string Hash)> FreshLinks(string home, string issuer, string wire, string account, string token, bool joined)
         {
             var (status, body) = Post(home, issuer, "/payload", new Dictionary<string, object> { ["id"] = wire, ["account"] = account, ["renew"] = token, ["parts"] = 1 });
             if (status != 200) return null;
-            if (parts == 0) return new List<(string, string)> { (Json.Str(body, "url") ?? "", Json.Str(body, "hash") ?? "") };
+            if (!joined) return new List<(string, string)> { (Json.Str(body, "url") ?? "", Json.Str(body, "hash") ?? "") };
             return (Json.List(body, "parts") ?? new List<object>()).OfType<Dictionary<string, object>>()
                 .Select(p => (Json.Str(p, "url") ?? "", Json.Str(p, "hash") ?? "")).ToList();
         }
@@ -456,7 +490,7 @@ namespace Hd2Qd.License
 
         /// <summary>The package and its receipt, written whole into a new folder beside the version's,
         /// then moved into place (an older package and its key cache go with the old folder).</summary>
-        static void WritePayload(string appData, string issuer, Dictionary<string, object> pay, List<byte[]> pieces, string receipt, int parts)
+        static void WritePayload(string appData, string issuer, Dictionary<string, object> pay, List<byte[]> pieces, string receipt, Dictionary<string, string> f)
         {
             var dir = PayloadFolder(appData, issuer, pay);
             var root = Path.GetDirectoryName(dir);
@@ -464,7 +498,7 @@ namespace Hd2Qd.License
             Directory.CreateDirectory(root);
             var tmp = Path.Combine(root, "." + name + ".new-" + Hex(Random(4)));
             Directory.CreateDirectory(tmp);
-            var names = SealNames(parts);
+            var names = SealNames(f);
             for (int i = 0; i < pieces.Count; i++) File.WriteAllBytes(Path.Combine(tmp, names[i]), pieces[i]);
             File.WriteAllText(Path.Combine(tmp, "receipt.txt"), receipt, new UTF8Encoding(false));
             string old = null;
@@ -524,7 +558,15 @@ namespace Hd2Qd.License
             {
                 var path = Json.Str(m, "path");
                 if (path == null || !Directory.Exists(path) || PayloadOf(path) == null) continue;
-                try { any |= Json.Bool(ClaimPayload(home, appData, path, force), "claimed"); }
+                try
+                {
+                    var r = ClaimPayload(home, appData, path, force);
+                    any |= Json.Bool(r, "claimed");
+                    // (1.12.0) the issuer refused the membership: a protected game package's staged
+                    // plaintext goes, and the next deploy drops the mod (an expired receipt alone does not)
+                    var why = Json.Str(r, "error");
+                    if ((why == "not_member" || why == "banned") && PayloadOf(path) is Dictionary<string, object> pay && GameForm(pay)) RemoveStage(host, path);
+                }
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is CryptographicException)
                 {
                     lastPayload[path] = "other";
@@ -540,6 +582,8 @@ namespace Hd2Qd.License
                     var rel = gone.Substring(LicenseDir(appData).Length).TrimStart('\\');
                     Log(home, rel.Split('\\')[0], "removed " + rel);
                 }
+                // (1.12.0) and the stage folders no library mod's build names any more
+                foreach (var gone in CleanStages(host, library)) Log(home, null, "removed staged " + gone);
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
             return any;
@@ -597,7 +641,7 @@ namespace Hd2Qd.License
                 var path = Json.Str(m, "path");
                 if (path == null || !Directory.Exists(path)) continue;
                 var pay = PayloadOf(path);
-                if (pay == null || Json.Str(pay, "error") != null) continue;
+                if (pay == null || Json.Str(pay, "error") != null || GameForm(pay)) continue;   // (1.12.0) staged for the manager, not unlocked per game
                 var decl = Declaration(path);
                 if (decl == null || Json.Str(decl, "error") != null) continue;
                 count++;
@@ -669,7 +713,7 @@ namespace Hd2Qd.License
                 {
                     got = FetchPayload(home, decl, pay, account, token, true);
                     if (got.Error != null) continue;
-                    WritePayload(appData, issuer, pay, got.Sealed, got.Receipt, PartsOf(got.Fields));
+                    WritePayload(appData, issuer, pay, got.Sealed, got.Receipt, got.Fields);
                     Log(home, issuer, "payload " + Json.Str(pay, "wire") + ": the author replaced the package; downloaded again");
                 }
                 else File.WriteAllText(Path.Combine(dir, "receipt.txt"), got.Receipt, new UTF8Encoding(false));
@@ -690,10 +734,9 @@ namespace Hd2Qd.License
             var dir = PayloadFolder(appData, issuer, pay);
             var f = VerifyPayloadReceipt(File.ReadAllText(Path.Combine(dir, "receipt.txt")), issuer, Json.Str(decl, "key"));
             if (f == null) return false;
-            int parts = PartsOf(f);
-            var pieces = ReadPieces(dir, parts);
-            if (pieces == null || JoinedHash(pieces, parts) != f["sealed_hash"]) return false;
-            var plain = OpenPieces(key, pieces, parts, f["plain_hash"]);
+            var pieces = ReadPieces(dir, f);
+            if (pieces == null || JoinedHash(pieces, f) != f["sealed_hash"]) return false;
+            var plain = OpenPieces(key, pieces, f);
             if (plain == null) return false;     // wrong key or tampered: fail closed
             var target = Path.Combine(dir, Json.Str(pay, "file"));
             var tmp = target + ".new-" + Hex(Random(4));

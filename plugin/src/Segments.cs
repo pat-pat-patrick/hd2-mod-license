@@ -458,7 +458,8 @@ namespace Hd2Qd.License
 
         /// <summary>(1.10.0) Whether a mod's member content is unlocked per game session (sealed
         /// segments, or any payload): it then needs this program running when the game starts.</summary>
-        public static bool UnlockedPerSession(string modFolder) => Json.Bool(SegmentsOf(modFolder), "sealed") || PayloadOf(modFolder) != null;
+        public static bool UnlockedPerSession(string modFolder) => Json.Bool(SegmentsOf(modFolder), "sealed")
+            || PayloadOf(modFolder) is Dictionary<string, object> pay && !GameForm(pay);   // (1.12.0) a game package is staged for the manager
 
         // -- in the background, once per version ---------------------------------------------
 

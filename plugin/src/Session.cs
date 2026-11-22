@@ -174,7 +174,7 @@ namespace Hd2Qd.License
                 finally { oneTry = false; }
                 // (1.10.0) the payloads: a mod with both is counted once
                 sealedCount += LibraryOf(host).Count(m => Json.Str(m, "path") is string p && Directory.Exists(p)
-                    && PayloadOf(p) is Dictionary<string, object> pay && Json.Str(pay, "error") == null && !Json.Bool(SegmentsOf(p), "sealed"));
+                    && PayloadOf(p) is Dictionary<string, object> pay && Json.Str(pay, "error") == null && !GameForm(pay) && !Json.Bool(SegmentsOf(p), "sealed"));
             }
             // (1.9.0) every game start, so a log tells a game this program saw from one it never saw
             Log(home, null, (late ? "the game was already running at this program's start" : "game started") + ": " + sealedCount + " mod(s) with sealed member content in the library");
