@@ -1,4 +1,6 @@
-# HD2 Mod License 协议扩展：静态资源 MOD（草案 4，2026-11-22；草案 3 为 2026-11-21，草案 2 为 2026-11-20，草案 1 为 2026-11-03）
+# HD2 Mod License 协议扩展：静态资源 MOD（草案 5，2026-11-23；草案 4 为 2026-11-22，草案 3 为 2026-11-21，草案 2 为 2026-11-20，草案 1 为 2026-11-03）
+
+> 草案 5 的改动：受保护的游戏资源包的 `manifest.json` 升为 `format: 2`——每个 `.seal` 先做 raw DEFLATE 再封装（7.2）。密文压不动，不压缩的话 MOD 包和明文一样大（Super Holo HUD v1.250.0：zip 4.7 MB，直接封装 34 MB）。`size`、`plain` 仍是明文的；`parts` 不压缩；`format: 1` 照旧可读。
 
 > 草案 4 的改动：**受保护的游戏资源包**（`deploy: "game"`，第 2 节、7.2）——几百 MB 的 patch 文件以密文随 MOD 包公开分发，发证方只门控密钥和少数按账号的指纹文件；作者选两种模式之一：`deploy`（部署后常驻）或 `session`（只在管理器启动的游戏期间存在）。收据可带 `base=`（MOD 包内密文清单的哈希）并允许 `parts=0`；组合从 32 字节扩到 64 字节（6.5）。
 
@@ -185,29 +187,31 @@ sig=<RSASSA-PKCS1-v1_5，SHA-256，覆盖 sig= 行之前全部字节>
 - 游戏启动时管理器先向 `/payload` 要当前的 `K_c` 和收据（在线），要不到就用缓存（宽限内）；收据的 `sealed_hash` 与常驻密文不同（作者换了基包）就重新下载。解出的明文核对 `plain_hash` 后整份写入（先写临时名再改名，外壳读不到半份）。
 - 外壳先读这个文件，再跑 Lua 分段；文件不在就什么都不做（与分段缺失一样，fail-closed）。
 
-### 7.2 `deploy: "game"`：受保护的游戏资源包（草案 4，会员插件 1.12.0 起）
+### 7.2 `deploy: "game"`：受保护的游戏资源包（草案 4，会员插件 1.12.0 起；`format: 2` 为草案 5，1.12.2 起）
 
 **MOD 包的内容**
 
 ```
 <MOD>\hd2_license.json        payload: {kind: "static", id, version, deploy: "game", mode}
 <MOD>\protected\manifest.json
-<MOD>\protected\<路径>.seal    每个不打指纹的文件：IV(16) ‖ AES-256-CBC/PKCS7，密钥 K_c
+<MOD>\protected\<路径>.seal    每个不打指纹的文件：IV(16) ‖ AES-256-CBC/PKCS7(raw DEFLATE(明文))，密钥 K_c
 ```
 
 `manifest.json`：
 
 ```json
 {
-  "format": 1,
+  "format": 2,
   "wire": "<线上 id>",
   "files": [{"path": "<相对 MOD 根目录，/ 分隔>", "size": 0, "sealed": "<.seal 的 SHA-256>", "plain": "<明文的 SHA-256>"}],
   "parts": [{"path": "<相对路径>", "size": 0}]
 }
 ```
 
+- `format`：`2` = 每个 `.seal` 是该文件的 raw DEFLATE（RFC 1951，无 zlib/gzip 头）再封装；`1`（草案 4）= 直接封装，插件照旧可读。其他值：整个 MOD 不就绪。两种格式下 `size`、`plain` 都是**明文**的大小和哈希，`sealed` 是 `.seal` 字节的哈希。
+- 为什么压缩：密文和随机数一样压不动，直接封装时 MOD 包和明文一样大。插件边解密边解压，读到超过 `size` 就停（不会被解压炸弹写满磁盘）。
 - `files`：所有不打指纹的文件。路径相对 MOD 根目录（各选项文件夹里常有同名的 patch 文件，所以不能只用文件名）；不得含空段、`.`、`..`、盘符或文件名不允许的字符。
-- `parts[p]`：第 `p` 个打指纹的文件。它的 `V` 个变体是 6.5 的分块对象（R2），与 `files` **同一把 `K_c`** 封装。可以为空（不打指纹）。
+- `parts[p]`：第 `p` 个打指纹的文件。它的 `V` 个变体是 6.5 的分块对象（R2），与 `files` **同一把 `K_c`** 封装，**不压缩**（两种格式都一样）。可以为空（不打指纹）。
 - 发证方的 `paymeta:<线上 id>` 带 `base_hash` = `manifest.json` 原始字节的 SHA-256；`/payload` 的收据带 `base=`（第 5 节）。插件核对 `base=` 等于 MOD 包里 manifest 的哈希，再逐个文件核对 `plain`。
 
 **暂存与部署**
@@ -324,7 +328,7 @@ sig=<RSASSA-PKCS1-v1_5，SHA-256，覆盖 sig= 行之前全部字节>
 
 ## 11. 版本
 
-- 本扩展标记：**static-resources 草案 4**。
+- 本扩展标记：**static-resources 草案 5**。
 - 在声明中以 `payload` 块的存在开启；收据首行 `HD2 PAYLOAD RECEIPT 2` 带版本号。不兼容的修改使用新的版本号。
 - 基础协议仍为 `protocol: 1`；本扩展不改动它。
 
@@ -342,3 +346,4 @@ sig=<RSASSA-PKCS1-v1_5，SHA-256，覆盖 sig= 行之前全部字节>
 | 发布 | manifest.jsonl → wrangler | 另有 `PUT /admin/payload` |
 | 分块指纹（草案 3） | 无 | `paymeta:`、`paymark:`，收据 `parts=N`，`/admin/paymeta`、`/admin/paymarks`、`/admin/payload-prune` |
 | 受保护的游戏资源包（草案 4） | 无 | `deploy: "game"` + `mode`；`protected/manifest.json`；`paymeta.base_hash`，收据 `base=`，允许 `parts=0`；组合 64 字节 |
+| 先压缩再封装（草案 5） | 无 | `protected/manifest.json` 的 `format: 2`：`.seal` = 封装(raw DEFLATE(明文))；`format: 1` 照旧可读 |

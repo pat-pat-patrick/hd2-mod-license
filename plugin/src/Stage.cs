@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -16,9 +17,13 @@ namespace Hd2Qd.License
     /// K_c; the issuer gates only that key, plus the account's variant of a few fingerprinted files
     /// (the parts of a joined receipt, N may be 0). The receipt's base= is the SHA-256 of
     /// protected/manifest.json:
-    ///   {format: 1, wire, files: [{path, size, sealed, plain}], parts: [{path, size}]}
+    ///   {format: 2, wire, files: [{path, size, sealed, plain}], parts: [{path, size}]}
     /// (paths relative to the mod's folder, '/' separated; files[i] is sealed at
     /// protected/&lt;path&gt;.seal; parts[p] is the receipt's p-th part.)
+    /// (1.12.2) Format 2 deflates each file before sealing it (IV ‖ AES-256-CBC of its raw
+    /// DEFLATE): ciphertext does not compress, so a sealed mod's zip was as big as its game
+    /// files (Super Holo HUD: 4.7 MB zipped, 34 MB sealed). Format 1 (sealed as is) is still read.
+    /// size and plain are the plaintext's in both; parts are never deflated.
     ///
     /// The manager (host["stage"], a folder on the game's drive) deploys from the folder this
     /// plugin fills, laid out as the mod's own: ModSource says where, once it is ready;
@@ -35,6 +40,7 @@ namespace Hd2Qd.License
         sealed class GameManifest
         {
             public string Wire, Base;
+            public bool Deflated;                                         // format 2
             public List<(string Path, long Size, string Plain)> Files = new List<(string, long, string)>();
             public List<(string Path, long Size)> Parts = new List<(string, long)>();
             public long Total => Files.Sum(f => f.Size) + Parts.Sum(p => p.Size);
@@ -56,7 +62,7 @@ namespace Hd2Qd.License
         static readonly Dictionary<string, (string Stamp, GameManifest M)> manifestCache =
             new Dictionary<string, (string, GameManifest)>(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>The mod's protected/manifest.json, read and checked (format 1, safe distinct
+        /// <summary>The mod's protected/manifest.json, read and checked (format 1 or 2, safe distinct
         /// paths, hashes as hex), with Base its bytes' SHA-256. Null when it is missing or bad.
         /// Read again only when the file changed.</summary>
         static GameManifest ReadManifest(string modFolder)
@@ -83,8 +89,9 @@ namespace Hd2Qd.License
 
         static GameManifest ParseManifest(Dictionary<string, object> d, string baseHash)
         {
-            if (d == null || Json.Long(d, "format") != 1) return null;
-            var m = new GameManifest { Wire = Json.Str(d, "wire"), Base = baseHash };
+            long format = d == null ? 0 : Json.Long(d, "format");
+            if (format != 1 && format != 2) return null;
+            var m = new GameManifest { Wire = Json.Str(d, "wire"), Base = baseHash, Deflated = format == 2 };
             if (m.Wire == null || !PayloadId.IsMatch(m.Wire)) return null;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var o in Json.List(d, "files") ?? new List<object>())
@@ -282,7 +289,7 @@ namespace Hd2Qd.License
                     if (SizeIs(target, x.Size)) continue;                         // written whole before: never again
                     var source = Path.Combine(modFolder, "protected", x.Path + ".seal");
                     if (!File.Exists(source)) { Log(home, issuer, label + ": " + x.Path + ".seal is missing from the mod: not staged"); return false; }
-                    if (!DecryptFileTo(key, source, target, x.Size, x.Plain)) { Log(home, issuer, label + ": " + x.Path + " did not decrypt to what the manifest signs: not staged"); return false; }
+                    if (!DecryptFileTo(key, source, target, x.Size, x.Plain, m.Deflated)) { Log(home, issuer, label + ": " + x.Path + " did not decrypt to what the manifest signs: not staged"); return false; }
                     wrote++;
                 }
                 // the account's fingerprinted files: the parts, decrypted together against plain_hash
@@ -315,10 +322,12 @@ namespace Hd2Qd.License
             catch (Exception e) when (e is ArgumentException || e is IOException || e is UnauthorizedAccessException) { return true; }
         }
 
-        /// <summary>Decrypts one sealed file (IV(16) ‖ AES-256-CBC/PKCS7) into target, streaming: the
-        /// plaintext is hashed as it is written to a temporary name and moved into place only when
-        /// its size and SHA-256 are the manifest's. False (nothing left behind) otherwise.</summary>
-        static bool DecryptFileTo(byte[] key, string sealedPath, string target, long size, string plainHash)
+        /// <summary>Decrypts one sealed file (IV(16) ‖ AES-256-CBC/PKCS7), inflating it after when
+        /// deflated (format 2), into target, streaming: the plaintext is hashed as it is written to
+        /// a temporary name and moved into place only when its size and SHA-256 are the manifest's
+        /// (reading stops past the size, so a deflate bomb writes no more than that). False
+        /// (nothing left behind) otherwise.</summary>
+        static bool DecryptFileTo(byte[] key, string sealedPath, string target, long size, string plainHash, bool deflated)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(target));
             var tmp = target + ".new-" + Hex(Random(4));
@@ -335,13 +344,14 @@ namespace Hd2Qd.License
                         aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7; aes.Key = key; aes.IV = iv;
                         using (var dec = aes.CreateDecryptor())
                         using (var cs = new CryptoStream(src, dec, CryptoStreamMode.Read))
+                        using (var plain = deflated ? (Stream)new DeflateStream(cs, CompressionMode.Decompress) : cs)
                         using (var sha = SHA256.Create())
                         using (var dst = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20))
                         {
                             var buf = new byte[1 << 20];
                             long total = 0;
                             int n;
-                            while ((n = cs.Read(buf, 0, buf.Length)) > 0)
+                            while ((n = plain.Read(buf, 0, buf.Length)) > 0)
                             {
                                 total += n;
                                 if (total > size) return false;
@@ -358,7 +368,7 @@ namespace Hd2Qd.License
                 ok = true;
                 return true;
             }
-            catch (CryptographicException) { return false; }
+            catch (Exception e) when (e is CryptographicException || e is InvalidDataException) { return false; }
             finally { if (!ok) TryDeleteFile(tmp); }
         }
 
