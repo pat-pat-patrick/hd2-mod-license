@@ -394,6 +394,12 @@ namespace Hd2Qd.License
             foreach (var d in Directory.GetDirectories(dir, "*", SearchOption.AllDirectories).OrderByDescending(x => x.Length).Concat(new[] { dir }))
                 try { if (!Directory.EnumerateFileSystemEntries(d).Any()) Directory.Delete(d); }
                 catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+            // (1.12.1) and the folders above it this plugin made, while empty: <issuer>, license and the
+            // stage root itself (StageDir), so nothing is left in the game's folder
+            var up = Directory.GetParent(dir);
+            for (int i = 0; i < 3 && up != null && !Directory.Exists(dir); i++, dir = up.FullName, up = up.Parent)
+                try { if (up.Exists && !up.EnumerateFileSystemInfos().Any()) up.Delete(); else break; }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { break; }
             return kept;
         }
 

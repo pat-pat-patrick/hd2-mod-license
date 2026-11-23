@@ -192,8 +192,11 @@ namespace Hd2Qd.License.Tests
             Assert.True(Plugin.PrepareDeploy(host));
             var folder = Json.Str(Plugin.ModSource(pack.Folder, host), "folder");
             issuer.PayloadError = "not_member";
+            Directory.CreateDirectory(Path.Combine(Stage, "other"));     // not ours: the root stays
             Plugin.ClaimAll(host, true);
             Assert.False(Directory.Exists(folder));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(folder)));    // the issuer's folder, now empty
+            Assert.True(Directory.Exists(Path.Combine(Stage, "other")));
             Assert.Equal("", Json.Str(Plugin.ModSource(pack.Folder, host), "folder"));
         }
 
@@ -223,11 +226,14 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("", Json.Str(Plugin.ModSource(pack.Folder, host), "folder"));
             Assert.True(File.Exists(linked));
             Assert.False(File.Exists(Path.Combine(folder, "opt", "A", "9ba626afa44a3aa3.patch_0")));
+            Assert.True(Directory.Exists(Stage));          // a file is still in it: the folders above stay
 
-            // once a deploy took it out of data, the next end removes it too
+            // once a deploy took it out of data, the next end removes it too, and (1.12.1) the empty
+            // folders above it, the stage root included: nothing is left in the game's folder
             File.Delete(Path.Combine(data, "9ba626afa44a3aa3.patch_0"));
             Plugin.EndSession(host);
             Assert.False(Directory.Exists(folder));
+            Assert.False(Directory.Exists(Stage));
         }
 
         [Fact]
