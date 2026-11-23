@@ -1256,6 +1256,74 @@ namespace Hd2Qd.License.Tests
             Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
         }
 
+        // -- (1.13.0) keyed gate: the chunk key K_F, from /session only, read once by the mod ------
+
+        static readonly byte[] FKeyBytes = Enumerable.Range(0, 32).Select(i => (byte)(200 - i)).ToArray();
+        static string HexOf(byte[] b) => string.Concat(b.Select(x => x.ToString("x2")));
+
+        [Fact]
+        public void A_game_start_writes_the_chunk_key_and_the_stop_removes_it()
+        {
+            issuer.FKeys["v1.2.0"] = FKeyBytes;
+            var dir = ClaimedC1(out var mod);
+            File.Delete(Path.Combine(dir, "key.dpapi"));            // so this game asks /session
+            Assert.True(Plugin.OnGameStart(Host()));
+            var fk = Path.Combine(dir, "fkey.txt");
+            Assert.True(File.Exists(fk), "the chunk key is written beside the plaintext");
+            Assert.Equal(HexOf(FKeyBytes), File.ReadAllText(fk));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+            Plugin.OnGameStop(Host());
+            Assert.False(File.Exists(fk), "the game's stop removes the chunk key");
+        }
+
+        [Fact]
+        public void The_chunk_key_is_kept_with_the_content_key_for_an_offline_game()
+        {
+            issuer.FKeys["v1.2.0"] = FKeyBytes;
+            var dir = ClaimedC1(out var mod);
+            File.Delete(Path.Combine(dir, "key.dpapi"));
+            Assert.True(Plugin.OnGameStart(Host()));               // online: K_v and K_F kept under the ticket
+            Plugin.OnGameStop(Host());
+            issuer.SessionError = "network_stub";
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 5 * 86400);
+            Assert.True(Plugin.OnGameStart(Host()), "within the grace the kept keys unlock");
+            Assert.Equal(HexOf(FKeyBytes), File.ReadAllText(Path.Combine(dir, "fkey.txt")));
+        }
+
+        [Fact]
+        public void The_renewal_does_not_write_the_chunk_key_again_once_the_mod_has_read_it()
+        {
+            issuer.FKeys["v1.2.0"] = FKeyBytes;
+            var dir = ClaimedC1(out var mod);
+            var fk = Path.Combine(dir, "fkey.txt");
+            // the mod loads (and deletes the key) while the renewal's request is out
+            issuer.OnSession = () => { if (File.Exists(fk)) File.Delete(fk); };
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.True(File.Exists(Path.Combine(dir, "seg1.lua")));
+            Assert.False(File.Exists(fk), "the key the mod deleted does not come back during the game");
+        }
+
+        [Fact]
+        public void A_chunk_key_the_ticket_does_not_name_is_not_used()
+        {
+            issuer.FKeys["v1.2.0"] = FKeyBytes;
+            issuer.FKeyUnnamed = true;
+            var dir = ClaimedC1(out var mod);
+            File.Delete(Path.Combine(dir, "key.dpapi"));
+            Assert.True(Plugin.OnGameStart(Host()), "the segments still decrypt");
+            Assert.False(File.Exists(Path.Combine(dir, "fkey.txt")), "but no chunk key is written");
+        }
+
+        [Fact]
+        public void A_version_without_a_chunk_key_leaves_no_old_one_behind()
+        {
+            var dir = ClaimedC1(out var mod);
+            File.WriteAllText(Path.Combine(dir, "fkey.txt"), "00");   // left by a crash
+            File.Delete(Path.Combine(dir, "key.dpapi"));
+            Assert.True(Plugin.OnGameStart(Host()));
+            Assert.False(File.Exists(Path.Combine(dir, "fkey.txt")));
+        }
+
         // -- (1.11.5) unlocked from the kept key before any request ---------------------------------
 
         [Fact]
@@ -1732,7 +1800,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.12.2", Plugin.PluginVersion);
+            Assert.Equal("1.13.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1752,7 +1820,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.12.2\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.13.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1949,6 +2017,10 @@ namespace Hd2Qd.License.Tests
             public string SessionError;
             /// <summary>(audit 2026-11-19) /session answers without its signed ticket (an older issuer).</summary>
             public bool SessionNoTicket;
+            /// <summary>(1.13.0, keyed gate) versions with a chunk key K_F, handed out at /session; and a
+            /// K_F sent that the ticket does not name.</summary>
+            public readonly Dictionary<string, byte[]> FKeys = new Dictionary<string, byte[]>();
+            public bool FKeyUnnamed;
             /// <summary>(1.8.0) /diag: the log sent, the plugin version the last request said, and
             /// the status it answers instead (429, 404).</summary>
             public string LastDiagLog, LastClientHeader;
@@ -2066,12 +2138,16 @@ namespace Hd2Qd.License.Tests
             }
 
             /// <summary>The issuer's signed session ticket (POST /session): the key's hash and its expiry.</summary>
-            public string Ticket(string id, string version, string account, byte[] key, long issued, long grace, string signWith = "a")
+            public string Ticket(string id, string version, string account, byte[] key, long issued, long grace, string signWith = "a", byte[] fkey = null)
             {
-                string kh;
-                using (var sha = SHA256.Create()) kh = string.Concat(sha.ComputeHash(key).Select(b => b.ToString("x2")));
+                string kh, fh = null;
+                using (var sha = SHA256.Create())
+                {
+                    kh = string.Concat(sha.ComputeHash(key).Select(b => b.ToString("x2")));
+                    if (fkey != null) fh = string.Concat(sha.ComputeHash(fkey).Select(b => b.ToString("x2")));
+                }
                 var text = "HD2 MOD SESSION 1" + NL + "issuer=" + Name + NL + "id=" + id + NL + "version=" + version + NL + "account=" + account + NL +
-                           "key_hash=" + kh + NL + "issued=" + issued + NL + "expires=" + (issued + grace) + NL;
+                           "key_hash=" + kh + NL + (fh != null ? "fkey_hash=" + fh + NL : "") + "issued=" + issued + NL + "expires=" + (issued + grace) + NL;
                 return Sign(signWith, text);
             }
 
@@ -2311,7 +2387,10 @@ namespace Hd2Qd.License.Tests
                     if (!sm.Accounts.Contains(acct)) return (403, new Dictionary<string, object> { ["error"] = "account" });
                     if (!Keys.ContainsKey(version)) return (409, new Dictionary<string, object> { ["error"] = "payload_pending" });
                     var answer = new Dictionary<string, object> { ["key"] = Convert.ToBase64String(Keys[version]), ["grace"] = Grace };
-                    if (!SessionNoTicket) answer["ticket"] = Ticket(id, version, acct, Keys[version], DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Grace);
+                    FKeys.TryGetValue(version, out var fk);
+                    if (fk != null) answer["fkey"] = Convert.ToBase64String(fk);
+                    if (!SessionNoTicket) answer["ticket"] = Ticket(id, version, acct, Keys[version], DateTimeOffset.UtcNow.ToUnixTimeSeconds(), Grace,
+                                                                    fkey: FKeyUnnamed ? null : fk);
                     return (200, answer);
                 }
                 if (path == "/claim")

@@ -215,9 +215,10 @@ namespace Hd2Qd.License
                         if (pass == Pass.Online) Log(home, issuer, SegLabel(path, seg) + ": nothing to unlock (no member content downloaded here for an account of this computer)");
                         continue;
                     }
+                    byte[] fkey;
                     byte[] key = pass == Pass.Kept
-                        ? CachedKey(home, appData, issuer, Json.Str(seg, "id"), Json.Str(seg, "version"), held)
-                        : SessionKey(home, appData, decl, seg, held);
+                        ? CachedKey(home, appData, issuer, Json.Str(seg, "id"), Json.Str(seg, "version"), held, out fkey)
+                        : SessionKey(home, appData, decl, seg, held, out fkey);
                     if (key == null)
                     {
                         if (pass == Pass.Online) { SetLastUnlock(path, "no_key"); Log(home, issuer, SegLabel(path, seg) + ": sealed (no session key: offline past grace, or another computer)"); }
@@ -225,8 +226,13 @@ namespace Hd2Qd.License
                     }
                     // Renew: the key is renewed (SessionKey keeps it); the plaintext written in the
                     // first pass stays, unless it went
-                    if (pass == Pass.Renew && PlainPresent(appData, decl, seg)) { Array.Clear(key, 0, key.Length); continue; }
-                    if (DecryptPlain(appData, decl, seg, key))
+                    // (1.13.0) and the chunk key written in the first pass is not written again:
+                    // the mod deletes it once read, and it must not come back during the game
+                    if (pass == Pass.Renew && PlainPresent(appData, decl, seg)) { Array.Clear(key, 0, key.Length); if (fkey != null) Array.Clear(fkey, 0, fkey.Length); continue; }
+                    bool done = DecryptPlain(appData, decl, seg, key);
+                    if (done) WriteChunkKey(appData, decl, seg, fkey);
+                    if (fkey != null) Array.Clear(fkey, 0, fkey.Length);
+                    if (done)
                     {
                         any = true;
                         opened.Add("seg|" + path);
@@ -272,6 +278,18 @@ namespace Hd2Qd.License
         /// another computer or for another account does not open).</summary>
         static byte[] SessionKey(string home, string appData, Dictionary<string, object> decl, Dictionary<string, object> seg, string account)
         {
+            var key = SessionKey(home, appData, decl, seg, account, out var fkey);
+            if (fkey != null) Array.Clear(fkey, 0, fkey.Length);
+            return key;
+        }
+
+        /// <summary>(1.13.0) K_v, and the version's chunk key K_F when the issuer has one (keyed
+        /// gate: hd2_diag\mod_licensing\DESIGN_keyed_gate.zh-CN.md, X). K_F comes only from /session,
+        /// to an account bound to the member, and is kept with K_v under the same signed ticket,
+        /// which names it (fkey_hash). One the ticket does not name is not used.</summary>
+        static byte[] SessionKey(string home, string appData, Dictionary<string, object> decl, Dictionary<string, object> seg, string account, out byte[] fkey)
+        {
+            fkey = null;
             string issuer = Json.Str(decl, "issuer"), id = Json.Str(seg, "id"), version = Json.Str(seg, "version");
             var tokens = BoundAccounts(home, appData, decl).FirstOrDefault(b => b.Account == account).Tokens ?? new List<string>();
             foreach (var token in tokens)
@@ -287,11 +305,38 @@ namespace Hd2Qd.License
                 // player can unprotect and rewrite (audit, 2026-11-19). An issuer that sends no good
                 // ticket gives this session its key and nothing to keep.
                 var ticket = Json.Str(body, "ticket");
-                if (ticket != null && VerifyTicket(ticket, issuer, PinnedKey(home, issuer), id, version, account, key) != null)
-                    CacheKey(appData, issuer, id, version, key, account, ticket);
+                byte[] f = TryBase64(Json.Str(body, "fkey"));
+                if (f != null && f.Length != 32) f = null;
+                var fields = ticket == null ? null : VerifyTicket(ticket, issuer, PinnedKey(home, issuer), id, version, account, key, f);
+                if (fields == null && f != null && ticket != null
+                    && VerifyTicket(ticket, issuer, PinnedKey(home, issuer), id, version, account, key) != null)
+                {
+                    f = null;                                    // a chunk key the signed ticket does not name: not used
+                    fields = VerifyTicket(ticket, issuer, PinnedKey(home, issuer), id, version, account, key);
+                }
+                if (fields != null) CacheKey(appData, issuer, id, version, key, account, ticket, f);
+                fkey = f;
                 return key;
             }
-            return CachedKey(home, appData, issuer, id, version, account);
+            return CachedKey(home, appData, issuer, id, version, account, out fkey);
+        }
+
+        /// <summary>(1.13.0) The file the mod's shell reads the chunk key from, once, and deletes.</summary>
+        const string ChunkKeyFile = "fkey.txt";
+
+        /// <summary>(1.13.0) After a decrypt: the chunk key, as hex, beside the plaintext segments,
+        /// written whole through a temporary name; a version with none leaves no old one behind.
+        /// The mod's shell reads it at load and deletes it, and the game's stop removes it too, so
+        /// it is on disk only from the game's start until the mod has loaded.</summary>
+        static void WriteChunkKey(string appData, Dictionary<string, object> decl, Dictionary<string, object> seg, byte[] fkey)
+        {
+            var dir = SegmentsFolder(appData, Json.Str(decl, "issuer"), Json.Str(seg, "id"), Json.Str(seg, "version"));
+            var path = Path.Combine(dir, ChunkKeyFile);
+            if (fkey == null) { if (File.Exists(path)) File.Delete(path); return; }
+            var tmp = path + ".new-" + Hex(Random(4));
+            File.WriteAllText(tmp, Hex(fkey), new UTF8Encoding(false));
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(tmp, path);
         }
 
         const string SessionHeader = "HD2 MOD SESSION 1\n";
@@ -303,7 +348,7 @@ namespace Hd2Qd.License
 
         /// <summary>The fields of an issuer's session ticket (POST /session) when it is signed by the
         /// pinned key and names this id, version, account and the key it came with; else null.</summary>
-        static Dictionary<string, string> VerifyTicket(string text, string issuer, string pinned, string id, string version, string account, byte[] key)
+        static Dictionary<string, string> VerifyTicket(string text, string issuer, string pinned, string id, string version, string account, byte[] key, byte[] fkey = null)
         {
             if (text == null || pinned == null) return null;
             text = text.Replace("\r", "");
@@ -317,7 +362,11 @@ namespace Hd2Qd.License
             if (!f.TryGetValue("issued", out var issued) || !long.TryParse(issued, out _)
                 || !f.TryGetValue("expires", out var exp) || !long.TryParse(exp, out _)) return null;
             using (var sha = SHA256.Create())
+            {
                 if (!f.TryGetValue("key_hash", out var kh) || kh != Hex(sha.ComputeHash(key))) return null;
+                // (1.13.0) a chunk key counts only as the one the ticket names
+                if (fkey != null && (!f.TryGetValue("fkey_hash", out var fh) || fh != Hex(sha.ComputeHash(fkey)))) return null;
+            }
             var modulus = Bytes(pinned);
             if (!System.Text.RegularExpressions.Regex.IsMatch(sig, "^[0-9a-fA-F]+$") || sig.Length != modulus.Length * 2) return null;
             using (var rsa = new RSACng())
@@ -334,12 +383,13 @@ namespace Hd2Qd.License
             catch (FormatException) { return null; }
         }
 
-        static void CacheKey(string appData, string issuer, string id, string version, byte[] key, string account, string ticket)
+        static void CacheKey(string appData, string issuer, string id, string version, byte[] key, string account, string ticket, byte[] fkey = null)
         {
             var dir = SegmentsFolder(appData, issuer, id, version);
             Directory.CreateDirectory(dir);
-            var record = Json.Write(new Dictionary<string, object>
-            { ["k"] = Convert.ToBase64String(key), ["account"] = account, ["t"] = ticket });
+            var rec = new Dictionary<string, object> { ["k"] = Convert.ToBase64String(key), ["account"] = account, ["t"] = ticket };
+            if (fkey != null) rec["f"] = Convert.ToBase64String(fkey);
+            var record = Json.Write(rec);
             var prot = ProtectedData.Protect(Encoding.UTF8.GetBytes(record), KeyEntropy, DataProtectionScope.CurrentUser);
             var path = Path.Combine(dir, KeyCacheFile);
             var tmp = path + ".tmp";
@@ -353,6 +403,14 @@ namespace Hd2Qd.License
         /// audit, 2026-11-19). A record without a good ticket opens nothing.</summary>
         static byte[] CachedKey(string home, string appData, string issuer, string id, string version, string account)
         {
+            var key = CachedKey(home, appData, issuer, id, version, account, out var fkey);
+            if (fkey != null) Array.Clear(fkey, 0, fkey.Length);
+            return key;
+        }
+
+        static byte[] CachedKey(string home, string appData, string issuer, string id, string version, string account, out byte[] fkey)
+        {
+            fkey = null;
             var path = Path.Combine(SegmentsFolder(appData, issuer, id, version), KeyCacheFile);
             if (!File.Exists(path)) return null;
             try
@@ -366,7 +424,12 @@ namespace Hd2Qd.License
                 var f = VerifyTicket(Json.Str(d, "t"), issuer, PinnedKey(home, issuer), id, version, account, key);
                 if (f == null) return null;
                 long now = Now(), issued = long.Parse(f["issued"]), expires = long.Parse(f["expires"]);
-                return now < expires && now >= issued - ClockSlack ? key : null;
+                if (!(now < expires && now >= issued - ClockSlack)) return null;
+                // (1.13.0) the chunk key kept with it, if the same signed ticket names it
+                var fk = TryBase64(Json.Str(d, "f"));
+                if (fk != null && fk.Length == 32 && VerifyTicket(Json.Str(d, "t"), issuer, PinnedKey(home, issuer), id, version, account, key, fk) != null)
+                    fkey = fk;
+                return key;
             }
             catch (Exception e) when (e is CryptographicException || e is FormatException || e is IOException || e is UnauthorizedAccessException) { return null; }
         }
@@ -447,6 +510,8 @@ namespace Hd2Qd.License
                         {
                             try
                             {
+                                // (1.13.0) a chunk key the mod did not read (or its half-written copy) goes in every case
+                                foreach (var k in Directory.GetFiles(ver, ChunkKeyFile + "*")) File.Delete(k);
                                 var lua = Directory.GetFiles(ver, "seg*.lua");
                                 if (lua.Length == 0 || PlaintextClaim(home, Path.GetFileName(iss), ver)) continue;
                                 foreach (var f in lua) File.Delete(f);
