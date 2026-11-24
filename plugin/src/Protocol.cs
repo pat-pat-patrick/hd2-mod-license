@@ -152,12 +152,33 @@ namespace Hd2Qd.License
             long expires = Expires(best);
             long issued = best.TryGetValue("issued", out var iv) && long.TryParse(iv, out var i) ? i : expires;
             r["expires"] = expires;
+            r["issued"] = issued;
             r["accounts"] = Named(best).Cast<object>().ToList();
+            Standing(best, r);
             long now = Now();
             if (now >= expires) return With(r, "expired");
             r["renew_due"] = now >= issued + (expires - issued) / 2;
             return With(r, "licensed");
         }
+
+        /// <summary>(1.14.0) The membership a license names, into r: tier (the tier's name), level
+        /// (1 for the author's cheapest tier, counting up), member_until (when the paid time ends).
+        /// An issuer older than 2026-11-24 names none of them.</summary>
+        static void Standing(Dictionary<string, string> f, Dictionary<string, object> r)
+        {
+            if (f.TryGetValue("tier", out var tier) && tier.Trim().Length > 0)
+            {
+                r["tier"] = tier.Trim();
+                r["level"] = f.TryGetValue("level", out var lv) && long.TryParse(lv, out var l) && l > 0 ? l : 1L;
+            }
+            if (f.TryGetValue("member_until", out var mu) && long.TryParse(mu, out var m) && m > 0) r["member_until"] = m;
+        }
+
+        /// <summary>(1.14.0) A license issued longer ago than this is renewed at the manager's start
+        /// and when the card is drawn, not only half way to its end: a member who paid for more
+        /// time, or moved to another tier, sees it the next time they look (the user, 2026-11-24).
+        /// For 爱发电 a renewal costs the issuer no KV write; for Patreon it is cached 6 hours.</summary>
+        internal const long FreshFor = 3600;
 
         // -- signing in --------------------------------------------------------------------
 
@@ -267,7 +288,9 @@ namespace Hd2Qd.License
             members[Holder(f)] = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(renew), Salt, DataProtectionScope.CurrentUser));
             rec["members"] = members;
             SaveIssuer(home, issuer, rec);
-            return new Dictionary<string, object> { ["ok"] = true, ["expires"] = long.Parse(f["expires"]) };
+            var ok = new Dictionary<string, object> { ["ok"] = true, ["expires"] = long.Parse(f["expires"]) };
+            Standing(f, ok);
+            return ok;
         }
 
         // -- activation codes ----------------------------------------------------------------
@@ -332,7 +355,7 @@ namespace Hd2Qd.License
         {
             lang = lang ?? "en";
             var error = Json.Str(r, "error");
-            string text = error == null ? Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))) : ErrorWords(r, lang);
+            string text = error == null ? DoneWords(r, lang) : ErrorWords(r, lang);
             return "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>HD2 MOD</title>"
                    + "<body style='font:16px system-ui;margin:3em auto;max-width:36em;padding:0 1em'><p>"
                    + System.Net.WebUtility.HtmlEncode(text) + "</p><p>" + System.Net.WebUtility.HtmlEncode(Words.Get(lang, "lic_page_close")) + "</p>";
@@ -365,7 +388,7 @@ namespace Hd2Qd.License
             foreach (var (holder, token) in tokens)
             {
                 var mine = held.Where(f => Holder(f) == holder).OrderByDescending(Expires).FirstOrDefault();
-                if (!force && mine != null && !Due(mine, now)) continue;
+                if (!force && mine != null && !Due(mine, now) && !Stale(mine, now)) continue;
                 var (status, body) = Post(home, issuer, "/renew", new Dictionary<string, object> { ["renew"] = token });
                 if (status != 200) { error = error ?? (status == 403 ? Json.Str(body, "error") ?? "network" : "network"); continue; }
                 var got = Json.Str(body, "license");
@@ -443,6 +466,9 @@ namespace Hd2Qd.License
         static List<string> Named(Dictionary<string, string> f) => f["accounts"].Split(',').ToList();
         static long Expires(Dictionary<string, string> f) => long.Parse(f["expires"]);
         static string Holder(Dictionary<string, string> f) => f.TryGetValue("holder", out var h) ? h : "";
+
+        static bool Stale(Dictionary<string, string> f, long now) =>
+            f.TryGetValue("issued", out var iv) && long.TryParse(iv, out var issued) && now - issued >= FreshFor;
 
         static bool Due(Dictionary<string, string> f, long now)
         {

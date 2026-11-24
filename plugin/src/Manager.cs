@@ -361,7 +361,9 @@ namespace Hd2Qd.License
             var until = st.ContainsKey("expires") ? When(Json.Long(st, "expires")) : null;
             switch (Json.Str(st, "state"))
             {
-                case "licensed": return "licensed until " + until + (Json.Bool(st, "renew_due") ? " (due for renewal)" : "");
+                case "licensed": return "licensed until " + until + (Json.Bool(st, "renew_due") ? " (due for renewal)" : "")
+                    + (Json.Str(st, "tier") is string tier ? "; tier " + tier + " (level " + Json.Long(st, "level") + ")" : "")
+                    + (Json.Long(st, "member_until") > 0 ? "; member until " + When(Json.Long(st, "member_until")) : "");
                 case "expired": return "expired on " + until;
                 case "none": return "not signed in here";
                 case "other_account": return "the license here is for another game account";

@@ -431,6 +431,38 @@ namespace Hd2Qd.License.Tests
         }
 
         [Fact]
+        public void The_tier_and_the_members_end_are_read_from_the_license_and_an_hour_old_one_is_renewed()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            Assert.Null(Json.Str(StateOf(mod), "tier"));                    // an issuer before 2026-11-24
+            Assert.Equal(0, Json.Long(StateOf(mod), "member_until"));
+
+            issuer.Standing = "tier=泰坦\nlevel=4\nmember_until=1800000000\n";
+            Assert.True(Json.Bool(Renew(Decl(mod), true), "renewed"));
+            var st = StateOf(mod);
+            Assert.Equal("licensed", Json.Str(st, "state"));
+            Assert.Equal("泰坦", Json.Str(st, "tier"));                     // UTF-8 from the issuer to the card
+            Assert.Equal(4, Json.Long(st, "level"));
+            Assert.Equal(1800000000, Json.Long(st, "member_until"));
+
+            // a fresh license is not asked for again; one issued an hour ago is, at the manager's
+            // start and when the card is drawn: a member who paid for more sees it the next time
+            int calls = issuer.RenewCalls;
+            Assert.False(Json.Bool(Renew(Decl(mod), false), "renewed"));
+            Assert.Equal(calls, issuer.RenewCalls);
+            issuer.Standing = "tier=武斗\nmember_until=1803000000\n";        // no level: 1
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600);
+            Assert.True(Json.Bool(Renew(Decl(mod), false), "renewed"));
+            st = StateOf(mod);
+            Assert.Equal("武斗", Json.Str(st, "tier"));
+            Assert.Equal(1, Json.Long(st, "level"));
+            Assert.Equal(1803000000, Json.Long(st, "member_until"));
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        }
+
+        [Fact]
         public void Signing_out_removes_the_license_and_the_token()
         {
             var mod = LicensedMod();
@@ -1800,7 +1832,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.13.0", Plugin.PluginVersion);
+            Assert.Equal("1.14.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1820,7 +1852,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.13.0\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.14.0\nmanager=0.22.0\n", sent);
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1994,6 +2026,8 @@ namespace Hd2Qd.License.Tests
             public readonly Dictionary<string, (string Holder, string[] Accounts)> Members = new Dictionary<string, (string, string[])>();
             public readonly List<string> Renewed = new List<string>();
             public int RenewCalls;
+            /// <summary>(1.14.0) lines an issuer from 2026-11-24 adds: tier=, level=, member_until=</summary>
+            public string Standing = "";
             /// <summary>/redeem: the one code it knows (made by the issuer's codes.js), what came,
             /// and how it answers instead (an error, or 404 as an issuer without codes).</summary>
             public string KnownCode = "G94PERCH4PTHXB521DB9", RedeemedCode, RedeemedAcct, RedeemError;
@@ -2241,7 +2275,7 @@ namespace Hd2Qd.License.Tests
             {
                 long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 var text = "HD2 MOD LICENSE 1\nissuer=" + (issuerName ?? Name) + "\naccounts=" + string.Join(",", accounts) +
-                           "\nissued=" + now + "\nexpires=" + (now + days * 86400L) + "\nholder=" + holder + "\n";
+                           "\nissued=" + now + "\nexpires=" + (now + days * 86400L) + "\nholder=" + holder + "\n" + Standing;
                 var pkcs8 = Convert.FromBase64String(Json.Str(Json.Obj(t.keys, key), "pkcs8"));
                 using (var rsa = new RSACng(CngKey.Import(pkcs8, CngKeyBlobFormat.Pkcs8PrivateBlob)))
                 {

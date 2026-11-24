@@ -28,8 +28,52 @@ namespace Hd2Qd.License
 
         static string Until(long unix) => DateTimeOffset.FromUnixTimeSeconds(unix).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
 
-        static string StateWords(string state, long expires, string lang) =>
-            state == "licensed" ? Words.F(lang, "lic_licensed", Until(expires))
+        static string Day(long unix) => DateTimeOffset.FromUnixTimeSeconds(unix).ToLocalTime().ToString("yyyy-MM-dd");
+
+        /// <summary>(1.14.0) A sign-in's or code's success: the tier and when the membership ends
+        /// when the issuer names them, else when the license ends.</summary>
+        internal static string DoneWords(Dictionary<string, object> r, string lang) =>
+            Json.Str(r, "tier") is string tier && Json.Long(r, "member_until") > 0
+                ? Words.F(lang, "lic_done_tier", tier, Day(Json.Long(r, "member_until")))
+                : Words.F(lang, "lic_done", Until(Json.Long(r, "expires")));
+
+        /// <summary>(1.14.0) A tier's colour by its level: the dearer, the brighter, and the top
+        /// two filled (the user, 2026-11-24: "不同的档位你要用颜色区分"; a member who pays the
+        /// most must see it). Steel, green, blue, gold; a fifth level and above is gold.</summary>
+        static readonly Color[] TierColours =
+        {
+            Color.FromRgb(0x8C, 0x9B, 0xAB), Color.FromRgb(0x3F, 0xAE, 0x72), Color.FromRgb(0x4A, 0x9E, 0xF0), Color.FromRgb(0xE0, 0xA5, 0x26),
+        };
+
+        internal static Brush TierBrush(long level)
+        {
+            var b = new SolidColorBrush(TierColours[(int)Math.Max(0, Math.Min(TierColours.Length - 1, level - 1))]);
+            b.Freeze();
+            return b;
+        }
+
+        /// <summary>(1.14.0) The tier's name in its colour: outlined for the lower levels, filled
+        /// for the top two, with a star on the top one.</summary>
+        internal static FrameworkElement TierBadge(string tier, long level)
+        {
+            var colour = TierBrush(level);
+            bool filled = level >= 3, top = level >= TierColours.Length;
+            return new Border
+            {
+                CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1.5), BorderBrush = colour,
+                Background = filled ? colour : Brushes.Transparent, Padding = new Thickness(7, 1, 7, 1),
+                Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = (top ? "\u2605 " : "") + tier, FontSize = 13, FontWeight = FontWeights.Bold,
+                    Foreground = !filled ? colour : top ? new SolidColorBrush(Color.FromRgb(0x1A, 0x14, 0x08)) : Brushes.White,
+                },
+            };
+        }
+
+        static string StateWords(string state, long expires, string lang, long memberUntil = 0) =>
+            state == "licensed" && memberUntil > 0 ? Words.F(lang, "lic_member_until", Day(memberUntil))
+            : state == "licensed" ? Words.F(lang, "lic_licensed", Until(expires))
             : state == "expired" ? Words.F(lang, "lic_expired", Until(expires))
             : Words.Get(lang, "lic_" + state);
 
@@ -37,14 +81,24 @@ namespace Hd2Qd.License
             new TextBlock { Text = text, FontSize = 12, Foreground = Brush("Muted"), TextWrapping = TextWrapping.Wrap, Margin = margin };
 
         /// <summary>A dot, the state in words, and what it is about underneath.</summary>
-        static UIElement Line(string words, string colour, string about)
+        static UIElement Line(string words, string colour, string about, string tier = null, long level = 0)
         {
             var head = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
-            var dot = new Ellipse { Width = 10, Height = 10, Fill = Brush(colour), Margin = new Thickness(0, 5, 10, 0), VerticalAlignment = VerticalAlignment.Top };
+            var dot = new Ellipse { Width = 10, Height = 10, Fill = tier != null ? TierBrush(level) : Brush(colour),
+                                    Margin = new Thickness(0, tier != null ? 7 : 5, 10, 0), VerticalAlignment = VerticalAlignment.Top };
             DockPanel.SetDock(dot, Dock.Left);
             head.Children.Add(dot);
             var text = new StackPanel();
-            text.Children.Add(new TextBlock { Text = words, FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            var title = new TextBlock { Text = words, FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+            if (tier == null) text.Children.Add(title);
+            else
+            {
+                // (1.14.0) the tier's badge, then when the membership ends
+                var row = new WrapPanel();
+                row.Children.Add(TierBadge(tier, level));
+                row.Children.Add(title);
+                text.Children.Add(row);
+            }
             text.Children.Add(Small(about, new Thickness(0, 2, 0, 0)));
             head.Children.Add(text);
             return head;
@@ -71,10 +125,16 @@ namespace Hd2Qd.License
                 var now = folder != null ? StateOf(home, appData, folder) : Status(home, appData, decl);
                 string state = Json.Str(now, "state") ?? "none";
                 bool busy = signingIn == issuer;
-                var line = Line(busy ? Words.Get(lang, "lic_waiting") : StateWords(state, Json.Long(now, "expires"), lang),
+                string tier = !busy && state == "licensed" ? Json.Str(now, "tier") : null;
+                var line = Line(busy ? Words.Get(lang, "lic_waiting") : StateWords(state, Json.Long(now, "expires"), lang, Json.Long(now, "member_until")),
                                 busy ? "Blue" : state == "licensed" ? "Blue" : "Yellow",
                                 Json.Str(decl, "name") + " · " + issuer + " · " +
-                                (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")));
+                                (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")),
+                                tier, Json.Long(now, "level"));
+                // (1.14.0) a license issued over an hour ago is renewed now, in the background, so a
+                // member who paid for more time or another tier sees it when they look
+                if (!busy && !TestIssuer(issuer) && state == "licensed" && signingIn == null && Now() - Json.Long(now, "issued") >= FreshFor)
+                    RenewInBackground(decl, host);
                 var about = new List<string>();
                 // (1.11.3) the buttons: what this state needs done, nothing more (1.11.2 showed up to
                 // five in a row: sign in again, code, sign out, fetch again, send log; the user,
@@ -88,6 +148,9 @@ namespace Hd2Qd.License
                     card.Buttons.Add((Words.Get(lang, state == "expired" ? "lic_sign_in_again" : "lic_sign_in"), true, canSignIn, () => SignIn(decl, host)));
                     card.Buttons.Add((Words.Get(lang, "lic_redeem"), false, canSignIn, () => RedeemCode(owner, decl, host)));
                 }
+                // (1.14.0) asks the author's site now: a member who has just paid sees it at once
+                if (!busy && site && state == "licensed" && canSignIn)
+                    card.Links.Add((Words.Get(lang, "lic_refresh"), () => RefreshMembership(decl, host)));
                 if (!busy && site && state == "licensed" && canSignIn)
                     card.Links.Add((Words.Get(lang, "lic_switch_member"), () => SignIn(decl, host)));
                 if (!busy && state != "none" && state != "no_account" && state != "test_issuer")
@@ -304,7 +367,7 @@ namespace Hd2Qd.License
                 wait = null;
             }
             var error = Json.Str(r, "error");
-            if (error == null) { Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue"); ClaimNow(host, false); }
+            if (error == null) { Foot(host, DoneWords(r, lang), "Blue"); ClaimNow(host, false); }
             else if (error == "cancelled") Foot(host, Words.Get(lang, "lic_cancelled"), "Muted");
             else
             {
@@ -344,7 +407,7 @@ namespace Hd2Qd.License
             }
             finally { signingIn = null; }
             var error = Json.Str(r, "error");
-            if (error == null) { Foot(host, Words.F(lang, "lic_done", Until(Json.Long(r, "expires"))), "Blue"); ClaimNow(host, false); }
+            if (error == null) { Foot(host, DoneWords(r, lang), "Blue"); ClaimNow(host, false); }
             else
             {
                 var words = error == "no_account" || error == "test_issuer" ? Words.Get(lang, "lic_" + error) : ErrorWords(r, lang);
@@ -429,6 +492,52 @@ namespace Hd2Qd.License
                     return Words.F(lang, "seg_failed", mod, Words.Get(lang, "lic_err_sign_in_again"));
                 default: return Words.F(lang, "seg_failed", mod, st);
             }
+        }
+
+        // (1.14.0) when each issuer was last renewed from the card's drawing: at most every 10 minutes
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> renewedFromCard =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, long>();
+
+        /// <summary>(1.14.0) Renews a license issued over an hour ago, in the background, and redraws
+        /// when one was renewed. A failure says nothing: the license runs to its end.</summary>
+        static void RenewInBackground(Dictionary<string, object> decl, Dictionary<string, object> host)
+        {
+            string issuer = Json.Str(decl, "issuer"), home = Home(host), appData = AppData(host);
+            long now = Now();
+            if (renewedFromCard.TryGetValue(issuer, out var last) && now - last < 600) return;
+            renewedFromCard[issuer] = now;
+            Task.Run(() =>
+            {
+                try { if (Json.Bool(Renew(home, appData, decl, false), "renewed")) RefreshFromWorker(host); }
+                catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException) { }
+            });
+        }
+
+        /// <summary>(1.14.0) The card's "refresh membership": asks the author's site now and says
+        /// what it answered, the tier and its end, at the foot of the window.</summary>
+        static async void RefreshMembership(Dictionary<string, object> decl, Dictionary<string, object> host)
+        {
+            string lang = Words.Lang(host), home = Home(host), appData = AppData(host), issuer = Json.Str(decl, "issuer");
+            signingIn = issuer;
+            Refresh(host);
+            Foot(host, Words.F(lang, "lic_refresh_waiting", Json.Str(decl, "name")), "Blue");
+            Dictionary<string, object> r;
+            try { r = await Task.Run(() => Renew(home, appData, decl, true)); }
+            catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException)
+            {
+                r = new Dictionary<string, object> { ["error"] = "other", ["detail"] = x.Message };
+            }
+            finally { signingIn = null; }
+            if (Json.Str(r, "error") != null) Foot(host, ErrorWords(r, lang), "Yellow");
+            else
+            {
+                var st = Status(home, appData, decl);
+                Foot(host, Json.Str(st, "tier") is string tier && Json.Long(st, "member_until") > 0
+                    ? Words.F(lang, "lic_refreshed_tier", tier, Day(Json.Long(st, "member_until")))
+                    : Words.F(lang, "lic_refreshed", Until(Json.Long(st, "expires"))), "Blue");
+                ClaimNow(host, false);
+            }
+            Refresh(host);
         }
 
         /// <summary>Claims in the background (after a sign-in, or the card's button), then redraws.</summary>
