@@ -439,12 +439,13 @@ namespace Hd2Qd.License.Tests
             Assert.Null(Json.Str(StateOf(mod), "tier"));                    // an issuer before 2026-11-24
             Assert.Equal(0, Json.Long(StateOf(mod), "member_until"));
 
-            issuer.Standing = "tier=泰坦\nlevel=4\nmember_until=1800000000\n";
+            issuer.Standing = "tier=泰坦\nlevel=4\nlevels=4\nmember_until=1800000000\n";
             Assert.True(Json.Bool(Renew(Decl(mod), true), "renewed"));
             var st = StateOf(mod);
             Assert.Equal("licensed", Json.Str(st, "state"));
             Assert.Equal("泰坦", Json.Str(st, "tier"));                     // UTF-8 from the issuer to the card
             Assert.Equal(4, Json.Long(st, "level"));
+            Assert.Equal(4, Json.Long(st, "levels"));
             Assert.Equal(1800000000, Json.Long(st, "member_until"));
 
             // a fresh license is not asked for again; one issued an hour ago is, at the manager's
@@ -452,12 +453,13 @@ namespace Hd2Qd.License.Tests
             int calls = issuer.RenewCalls;
             Assert.False(Json.Bool(Renew(Decl(mod), false), "renewed"));
             Assert.Equal(calls, issuer.RenewCalls);
-            issuer.Standing = "tier=武斗\nmember_until=1803000000\n";        // no level: 1
+            issuer.Standing = "tier=武斗\nlevels=0\nmember_until=1803000000\n";   // no level: 1; levels below it: none
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600);
             Assert.True(Json.Bool(Renew(Decl(mod), false), "renewed"));
             st = StateOf(mod);
             Assert.Equal("武斗", Json.Str(st, "tier"));
             Assert.Equal(1, Json.Long(st, "level"));
+            Assert.Equal(0, Json.Long(st, "levels"));
             Assert.Equal(1803000000, Json.Long(st, "member_until"));
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         }

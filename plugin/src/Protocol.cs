@@ -162,14 +162,16 @@ namespace Hd2Qd.License
         }
 
         /// <summary>(1.14.0) The membership a license names, into r: tier (the tier's name), level
-        /// (1 for the author's cheapest tier, counting up), member_until (when the paid time ends).
-        /// An issuer older than 2026-11-24 names none of them.</summary>
+        /// (1 for the author's cheapest tier, counting up), levels (how many tiers there are, when
+        /// the issuer knows), member_until (when the paid time ends). An issuer older than
+        /// 2026-11-24 names none of them.</summary>
         static void Standing(Dictionary<string, string> f, Dictionary<string, object> r)
         {
             if (f.TryGetValue("tier", out var tier) && tier.Trim().Length > 0)
             {
                 r["tier"] = tier.Trim();
                 r["level"] = f.TryGetValue("level", out var lv) && long.TryParse(lv, out var l) && l > 0 ? l : 1L;
+                if (f.TryGetValue("levels", out var ls) && long.TryParse(ls, out var n) && n >= (long)r["level"]) r["levels"] = n;
             }
             if (f.TryGetValue("member_until", out var mu) && long.TryParse(mu, out var m) && m > 0) r["member_until"] = m;
         }

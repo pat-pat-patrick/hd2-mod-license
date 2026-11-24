@@ -37,36 +37,47 @@ namespace Hd2Qd.License
                 ? Words.F(lang, "lic_done_tier", tier, Day(Json.Long(r, "member_until")))
                 : Words.F(lang, "lic_done", Until(Json.Long(r, "expires")));
 
-        /// <summary>(1.14.0) A tier's colour by its level: the dearer, the brighter, and the top
-        /// two filled (the user, 2026-11-24: "不同的档位你要用颜色区分"; a member who pays the
-        /// most must see it). Steel, green, blue, gold; a fifth level and above is gold.</summary>
+        /// <summary>(1.14.0) A tier's colour by its level (the user, 2026-11-24: "不同的档位你要用颜色
+        /// 区分"; a member who pays the most must see it): steel, green, blue, purple, orange from the
+        /// cheapest up, and the top tier always gold, however many an author has. The top is the
+        /// last of levels when the issuer says how many; otherwise a sixth level and above.</summary>
         static readonly Color[] TierColours =
         {
-            Color.FromRgb(0x8C, 0x9B, 0xAB), Color.FromRgb(0x3F, 0xAE, 0x72), Color.FromRgb(0x4A, 0x9E, 0xF0), Color.FromRgb(0xE0, 0xA5, 0x26),
+            Color.FromRgb(0x8C, 0x9B, 0xAB), Color.FromRgb(0x3F, 0xAE, 0x72), Color.FromRgb(0x4A, 0x9E, 0xF0),
+            Color.FromRgb(0xA6, 0x7C, 0xF0), Color.FromRgb(0xF0, 0x8A, 0x3C),
         };
+        static readonly Color TopColour = Color.FromRgb(0xE0, 0xA5, 0x26);
 
-        internal static Brush TierBrush(long level)
+        static bool TopTier(long level, long levels) => levels > 0 ? level >= levels : level > TierColours.Length;
+
+        static Color TierColour(long level, long levels) =>
+            TopTier(level, levels) ? TopColour : TierColours[(int)Math.Max(0, Math.Min(TierColours.Length - 1, level - 1))];
+
+        static Brush Frozen(Color c)
         {
-            var b = new SolidColorBrush(TierColours[(int)Math.Max(0, Math.Min(TierColours.Length - 1, level - 1))]);
+            var b = new SolidColorBrush(c);
             b.Freeze();
             return b;
         }
 
-        /// <summary>(1.14.0) The tier's name in its colour: outlined for the lower levels, filled
-        /// for the top two, with a star on the top one.</summary>
-        internal static FrameworkElement TierBadge(string tier, long level)
+        internal static Brush TierBrush(long level, long levels) => Frozen(TierColour(level, levels));
+
+        /// <summary>(1.14.0) The tier's name on a light wash of its colour, outlined and written in it
+        /// (the user chose this, 2026-11-24: every tier has a ground); the top tier solid gold with
+        /// a star.</summary>
+        internal static FrameworkElement TierBadge(string tier, long level, long levels)
         {
-            var colour = TierBrush(level);
-            bool filled = level >= 3, top = level >= TierColours.Length;
+            var c = TierColour(level, levels);
+            bool top = TopTier(level, levels);
             return new Border
             {
-                CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1.5), BorderBrush = colour,
-                Background = filled ? colour : Brushes.Transparent, Padding = new Thickness(7, 1, 7, 1),
+                CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1.5), BorderBrush = Frozen(c),
+                Background = Frozen(top ? c : Color.FromArgb(0x40, c.R, c.G, c.B)), Padding = new Thickness(7, 1, 7, 1),
                 Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
                 Child = new TextBlock
                 {
                     Text = (top ? "\u2605 " : "") + tier, FontSize = 13, FontWeight = FontWeights.Bold,
-                    Foreground = !filled ? colour : top ? new SolidColorBrush(Color.FromRgb(0x1A, 0x14, 0x08)) : Brushes.White,
+                    Foreground = top ? Frozen(Color.FromRgb(0x14, 0x12, 0x0A)) : Frozen(c),
                 },
             };
         }
@@ -81,10 +92,10 @@ namespace Hd2Qd.License
             new TextBlock { Text = text, FontSize = 12, Foreground = Brush("Muted"), TextWrapping = TextWrapping.Wrap, Margin = margin };
 
         /// <summary>A dot, the state in words, and what it is about underneath.</summary>
-        static UIElement Line(string words, string colour, string about, string tier = null, long level = 0)
+        static UIElement Line(string words, string colour, string about, string tier = null, long level = 0, long levels = 0)
         {
             var head = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
-            var dot = new Ellipse { Width = 10, Height = 10, Fill = tier != null ? TierBrush(level) : Brush(colour),
+            var dot = new Ellipse { Width = 10, Height = 10, Fill = tier != null ? TierBrush(level, levels) : Brush(colour),
                                     Margin = new Thickness(0, tier != null ? 7 : 5, 10, 0), VerticalAlignment = VerticalAlignment.Top };
             DockPanel.SetDock(dot, Dock.Left);
             head.Children.Add(dot);
@@ -95,7 +106,7 @@ namespace Hd2Qd.License
             {
                 // (1.14.0) the tier's badge, then when the membership ends
                 var row = new WrapPanel();
-                row.Children.Add(TierBadge(tier, level));
+                row.Children.Add(TierBadge(tier, level, levels));
                 row.Children.Add(title);
                 text.Children.Add(row);
             }
@@ -130,7 +141,7 @@ namespace Hd2Qd.License
                                 busy ? "Blue" : state == "licensed" ? "Blue" : "Yellow",
                                 Json.Str(decl, "name") + " · " + issuer + " · " +
                                 (mods.Count > 0 ? Words.F(lang, "lic_mods", string.Join(Words.Get(lang, "lic_mods_separator"), mods)) : Words.Get(lang, "lic_no_mods")),
-                                tier, Json.Long(now, "level"));
+                                tier, Json.Long(now, "level"), Json.Long(now, "levels"));
                 // (1.14.0) a license issued over an hour ago is renewed now, in the background, so a
                 // member who paid for more time or another tier sees it when they look
                 if (!busy && !TestIssuer(issuer) && state == "licensed" && signingIn == null && Now() - Json.Long(now, "issued") >= FreshFor)
