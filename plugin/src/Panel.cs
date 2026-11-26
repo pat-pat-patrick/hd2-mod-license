@@ -72,7 +72,9 @@ namespace Hd2Qd.License
             return new Border
             {
                 CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1.5), BorderBrush = Frozen(c),
-                Background = Frozen(top ? c : Color.FromArgb(0x40, c.R, c.G, c.B)), Padding = new Thickness(7, 1, 7, 1),
+                // (1.14.1) 1.5 above, 0.5 below: the manager's font (Bahnschrift, Chinese from YaHei UI)
+                // leaves room under the glyphs, so even padding put the name high in the badge
+                Background = Frozen(top ? c : Color.FromArgb(0x40, c.R, c.G, c.B)), Padding = new Thickness(7, 1.5, 7, 0.5),
                 Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
                 Child = new TextBlock
                 {
@@ -96,7 +98,7 @@ namespace Hd2Qd.License
         {
             var head = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
             var dot = new Ellipse { Width = 10, Height = 10, Fill = tier != null ? TierBrush(level, levels) : Brush(colour),
-                                    Margin = new Thickness(0, tier != null ? 7 : 5, 10, 0), VerticalAlignment = VerticalAlignment.Top };
+                                    Margin = new Thickness(0, 5, 10, 0), VerticalAlignment = VerticalAlignment.Top };   // (1.14.1) 5 beside a badge too: 7 put the dot below it
             DockPanel.SetDock(dot, Dock.Left);
             head.Children.Add(dot);
             var text = new StackPanel();
