@@ -45,7 +45,7 @@ namespace Hd2Qd.License
         /// build's declaration. Nobody can sign in there, so the manager offers no sign-in.</summary>
         public static bool TestIssuer(string issuer) => issuer != null && Reserved.IsMatch(issuer);
         static readonly byte[] Salt = Encoding.UTF8.GetBytes("hd2qd license renew");
-        static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        static readonly HttpClient Http = new HttpClient(NetFacts.Handler()) { Timeout = TimeSpan.FromSeconds(20) };
 
         // -- what a mod declares ---------------------------------------------------------
 
@@ -622,6 +622,7 @@ namespace Hd2Qd.License
         static (int, Dictionary<string, object>) PostOnce(string home, string issuer, string path, Dictionary<string, object> body)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
+            var started = DateTime.UtcNow;
             int status = 0;
             Dictionary<string, object> d = null;
             Exception failed = null;
@@ -636,11 +637,16 @@ namespace Hd2Qd.License
                         var text = r.Content.ReadAsStringAsync().GetAwaiter().GetResult();
                         try { d = Json.Parse(text) as Dictionary<string, object>; } catch (FormatException) { }
                         status = (int)r.StatusCode;
+                        NetFacts.SawDate(IssuerHost(issuer), r.Headers.Date);
                     }
                 }
             }
             catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException) { failed = e; status = 0; d = null; }
-            if (path != "/diag" || status != 200) Log(home, issuer, RequestWords(path, body, status, d, clock.ElapsedMilliseconds, failed));
+            // (1.15.0) a certificate Windows refused is named on the line, and an issuer not
+            // reached has this computer's network looked at (Network.cs)
+            if (path != "/diag" || status != 200)
+                Log(home, issuer, RequestWords(path, body, status, d, clock.ElapsedMilliseconds, failed) + (status == 0 ? RefusedWords(issuer, started) : ""));
+            if (status == 0) LookAtNetwork(home, issuer, failed, started);
             return (status, d);
         }
 

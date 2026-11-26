@@ -455,6 +455,19 @@ namespace Hd2Qd.License
                 Foot(host, words, "Blue");
                 Tell(host, words);
             }
+            else if (Json.Str(r, "error") == "network" && Json.Str(r, "file") is string file)
+            {
+                // (1.15.0) not sent: the saved file is copied (pasted into a chat or an e-mail, it
+                // goes as the file) and shown in Explorer
+                bool copied = false;
+                try { Clipboard.SetFileDropList(new System.Collections.Specialized.StringCollection { file }); copied = true; }
+                catch (Exception x) when (x is System.Runtime.InteropServices.COMException || x is System.Threading.ThreadStateException || x is ArgumentException) { }
+                try { Process.Start("explorer.exe", "/select,\"" + file + "\""); }
+                catch (Exception x) when (x is System.ComponentModel.Win32Exception || x is InvalidOperationException) { }
+                var words = Words.F(lang, copied ? "lic_send_log_saved" : "lic_send_log_saved_nocopy", file);
+                Foot(host, words, "Yellow");
+                Tell(host, words);
+            }
             else
             {
                 var error = Json.Str(r, "error");

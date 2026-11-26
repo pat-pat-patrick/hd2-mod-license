@@ -293,6 +293,8 @@ namespace Hd2Qd.License
                     var manager = host.TryGetValue("version", out var mv) ? mv as string : null;
                     var r = SendLog(home, appData, decl, manager);
                     var code = Json.Str(r, "code");
+                    if (code == null && Json.Str(r, "file") is string saved)
+                        throw new InvalidOperationException("could not reach " + Json.Str(decl, "issuer") + "; the log is saved as " + saved + ": send that file to the author");
                     if (code == null)
                         throw new InvalidOperationException(Json.Str(r, "error") == "rate" ? "too many logs sent today: try again tomorrow"
                             : Json.Str(r, "error") == "no_diag" ? Json.Str(decl, "issuer") + " takes no license logs"

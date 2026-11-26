@@ -35,6 +35,7 @@ namespace Hd2Qd.License.Tests
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             Plugin.RetryDelaysMs = new[] { 0, 0 };      // (1.11.3) retries without the pauses
             Plugin.StallMs = 1500;                      // (1.11.3) a stalled download noticed at once
+            Plugin.LogSaveFolder = Path.Combine(Root, "saved logs");   // (1.15.0) never the real desktop
         }
 
         public void Dispose()
@@ -1834,7 +1835,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.14.1", Plugin.PluginVersion);
+            Assert.Equal("1.15.0", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1854,7 +1855,11 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.14.1\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.15.0\nmanager=0.22.0\n", sent);
+            // (1.15.0) the network now, in the head: each fact once, before the lines
+            var head = sent.Substring(0, sent.IndexOf("\n---\n"));
+            foreach (var fact in new[] { "proxy", "adapters", "windows", "hosts", "software", "clock" }) Assert.Contains("\nnetwork." + fact + "=", head);
+            Assert.DoesNotContain("network.probe=", head);                         // no probe when sending
             Assert.Contains("sign-in: ok", sent);
             Assert.Matches(@"\nwindows=Windows 1[01] .*build \d+", sent);                // not .NET Framework's 6.2.9200
             Assert.Contains("removed nothing in particular", sent);                // a line about no author goes along
@@ -1867,8 +1872,22 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("no_diag", Json.Str(Plugin.SendLog(Home, appData, Decl(mod)), "error"));
             Assert.Equal("test_issuer", Json.Str(Plugin.SendLog(Home, appData, Decl(LicensedMod("T", issuerName: "lic.test"))), "error"));
             var dead = Decl(LicensedMod("Dead", issuerName: "127.0.0.1:1"));
-            Assert.Equal("network", Json.Str(Plugin.SendLog(Home, appData, dead), "error"));
+            var unsent = Plugin.SendLog(Home, appData, dead);
+            Assert.Equal("network", Json.Str(unsent, "error"));
             Assert.Contains("[127.0.0.1:1] POST /diag -> unreachable", File.ReadAllText(Plugin.LogPath(Home)));
+            // (1.15.0) not sent: the same text saved for the player to send another way
+            var file = Json.Str(unsent, "file");
+            Assert.NotNull(file);
+            Assert.Equal(Path.Combine(Root, "saved logs"), Path.GetDirectoryName(file));
+            Assert.Matches(@"^HD2 license log 127\.0\.0\.1_1 \d{4}-\d\d-\d\d \d{4}\.txt$", Path.GetFileName(file));
+            var saved = File.ReadAllText(file);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\r\nissuer=127.0.0.1:1\r\n", saved);
+            Assert.Contains("\r\nnetwork.proxy=", saved);
+            Assert.Contains("removed nothing in particular", saved);
+            Assert.DoesNotContain("other.example", saved);
+            Assert.Contains("could not send this log; saved it for the player to send: " + Path.GetFileName(file), File.ReadAllText(Plugin.LogPath(Home)));
+            // an issuer on this computer (http) has no network look: no "network:" line
+            Assert.DoesNotContain("[127.0.0.1:1] network: ", File.ReadAllText(Plugin.LogPath(Home)));
         }
 
         /// <summary>(1.9.0) A package's .hd2_license_via says which members' site its sign-in

@@ -93,7 +93,7 @@ namespace Hd2Qd.License
         static readonly byte[] PayloadEntropy = Encoding.ASCII.GetBytes("hd2qd-license-payload-1");
         /// <summary>The largest sealed package taken (the issuer's R2 object; Super Callouts' is ~20 MB).</summary>
         const long PayloadMax = 256L * 1024 * 1024;
-        static readonly HttpClient Download = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        static readonly HttpClient Download = new HttpClient(NetFacts.Handler()) { Timeout = TimeSpan.FromMinutes(10) };
 
         /// <summary>{id, version (or null), wire (the id sent to the issuer: id, or id.version), file}
         /// for a mod that declares a payload; null for one that does not; {error}: "bad_declaration",
@@ -362,6 +362,7 @@ namespace Hd2Qd.License
                     // the link comes from the issuer itself (same scheme and host), never another site
                     if (!url.StartsWith(Base(issuer) + "/", StringComparison.Ordinal)) return new Fetched { Error = "bad_receipt" };
                     int at = i, of = links.Count;
+                    var tried = DateTime.UtcNow;
                     try { bytes = GetBytes(home, issuer, url, part => progress?.Invoke((at + part) / of)); break; }
                     catch (LinkExpired)
                     {
@@ -375,7 +376,8 @@ namespace Hd2Qd.License
                     }
                     catch (Exception e) when (e is HttpRequestException || e is TaskCanceledException || e is IOException)
                     {
-                        Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message);
+                        Log(home, issuer, "GET /payload/blob: " + e.GetType().Name + " " + e.Message + RefusedWords(issuer, tried));
+                        LookAtNetwork(home, issuer, e, tried);
                         if (attempt >= RetryDelaysMs.Length) return new Fetched { Error = "network" };
                         if (RetryDelaysMs[attempt] > 0) System.Threading.Thread.Sleep(RetryDelaysMs[attempt]);
                     }

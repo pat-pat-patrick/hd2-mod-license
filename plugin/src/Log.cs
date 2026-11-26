@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Hd2Qd.License
 {
@@ -157,7 +158,8 @@ namespace Hd2Qd.License
         /// stands now), then the log's lines about that issuer and those about none, the newest
         /// 100 KB. {code, days}: the code the player gives the author, who reads it on the issuer
         /// for that many days; or {error}: "test_issuer", "empty", "rate" (too many today),
-        /// "no_diag" (an issuer that takes no logs), "network".</summary>
+        /// "no_diag" (an issuer that takes no logs), "network" (1.15.0: with "file", where the
+        /// same text was saved for the player to send another way).</summary>
         public static Dictionary<string, object> SendLog(string home, string appData, Dictionary<string, object> decl, string manager = null)
         {
             string issuer = Json.Str(decl, "issuer");
@@ -172,6 +174,10 @@ namespace Hd2Qd.License
             head.Append("windows=").Append(WindowsVersion()).Append('\n');
             head.Append("sent=").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz")).Append('\n');
             head.Append("state=").Append(lastState.TryGetValue(home + "|" + issuer, out var now) ? now : Json.Str(st, "state")).Append('\n');
+            // (1.15.0) this computer's network now, without the probe (Network.cs says what is
+            // never in it); a failed request's own look, with the probe, is among the lines
+            try { foreach (var fact in NetFacts.Facts(new Uri(Base(issuer) + "/"), probe: false)) head.Append("network.").Append(fact.Substring(0, fact.IndexOf(':'))).Append('=').Append(fact.Substring(fact.IndexOf(':') + 2).Replace('\n', ' ')).Append('\n'); }
+            catch (UriFormatException) { }
             head.Append("---\n");
 
             var lines = new List<string>();
@@ -197,7 +203,42 @@ namespace Hd2Qd.License
             }
             if (status == 429) return Err("rate");
             if (status == 404) return Err("no_diag");
-            return Err("network");
+            // (1.15.0) the issuer cannot be reached (the very thing the log is often about): the same
+            // text is saved as a file the player can send to the author another way
+            var r = Err("network");
+            if (SaveLogToSend(issuer, head.ToString() + bodyText) is string saved)
+            {
+                Log(home, issuer, "could not send this log; saved it for the player to send: " + Path.GetFileName(saved));
+                r["file"] = saved;
+            }
+            return r;
+        }
+
+        /// <summary>(1.15.0) Set by tests: where a log that could not be sent is saved instead of
+        /// the desktop.</summary>
+        public static string LogSaveFolder;
+
+        /// <summary>(1.15.0) Desktop\HD2 license log &lt;issuer&gt; &lt;yyyy-MM-dd HHmm&gt;.txt (else
+        /// the temporary folder when there is no desktop to write to); null when neither takes it.
+        /// Tests name the folder (LogSaveFolder).</summary>
+        public static string SaveLogToSend(string issuer, string text, string folder = null)
+        {
+            folder = folder ?? LogSaveFolder;
+            var name = "HD2 license log " + Regex.Replace(issuer ?? "issuer", @"[^0-9A-Za-z._-]", "_") + " " + DateTime.Now.ToString("yyyy-MM-dd HHmm") + ".txt";
+            var places = folder != null ? new[] { folder } : new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Path.GetTempPath() };
+            foreach (var dir in places)
+            {
+                if (string.IsNullOrEmpty(dir)) continue;
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                    var path = Path.Combine(dir, name);
+                    File.WriteAllText(path, text.Replace("\r\n", "\n").Replace("\n", "\r\n"), new UTF8Encoding(true));
+                    return path;
+                }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is NotSupportedException) { }
+            }
+            return null;
         }
     }
 }
