@@ -465,6 +465,82 @@ namespace Hd2Qd.License.Tests
             SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         }
 
+        // (1.15.1) a player's log, 2026-11-27: the game's data folder was cleared with the manager
+        // open, the license file went with it, and the card asked for a browser sign-in although the
+        // renew token was still kept in the manager's folder
+        [Fact]
+        public void A_license_file_that_went_comes_back_from_the_kept_sign_in()
+        {
+            var mod = LicensedMod();
+            InLibrary("Licensed", mod);
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            int calls = issuer.RenewCalls;
+            Assert.False(Plugin.RestoreLicense(Home, appData, Decl(mod), true));   // nothing missing: no request
+            Assert.Equal(calls, issuer.RenewCalls);
+
+            File.Delete(LicenseFile);
+            Assert.Equal("none", Json.Str(StateOf(mod), "state"));
+            Assert.True(Plugin.RestoreLicense(Home, appData, Decl(mod), true));
+            Assert.Equal(calls + 1, issuer.RenewCalls);
+            Assert.Equal("licensed", Json.Str(StateOf(mod), "state"));
+
+            // the whole game folder gone, saves and all: renewed at the deploy and at the game start
+            Directory.Delete(Path.Combine(appData, "Arrowhead"), true);
+            Plugin.PrepareDeploy(Host());
+            Assert.True(File.Exists(LicenseFile));
+            File.Delete(LicenseFile);
+            Plugin.OnGameStart(Host());
+            Assert.True(File.Exists(LicenseFile));
+            Assert.Contains("license file missing here: renewing it from the sign-in kept here", File.ReadAllText(Path.Combine(Home, "license", "license.log")));
+
+            // an expired one too (the game made its saves again)
+            Account(A);
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 40L * 86400);
+            Assert.Equal("expired", Json.Str(StateOf(mod), "state"));
+            calls = issuer.RenewCalls;
+            Assert.True(Plugin.RestoreLicense(Home, appData, Decl(mod), true));   // (the test issuer dates by the real clock)
+            Assert.Equal(calls + 1, issuer.RenewCalls);
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+            // signed out: no token, nothing asked
+            Forget(issuer.Name);
+            calls = issuer.RenewCalls;
+            Assert.False(Plugin.RestoreLicense(Home, appData, Decl(mod), true));
+            Plugin.PrepareDeploy(Host());
+            Assert.Equal(calls, issuer.RenewCalls);
+            Assert.False(File.Exists(LicenseFile));
+        }
+
+        [Fact]
+        public void A_restore_that_fails_is_one_try_and_waits_before_asking_again()
+        {
+            var mod = LicensedMod();
+            Account(A);
+            Assert.Equal("ok", SignIn(mod));
+            File.Delete(LicenseFile);
+            long t0 = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            SetClock(() => t0);
+            issuer.DropNext = 3;
+            Assert.False(Plugin.RestoreLicense(Home, appData, Decl(mod), true));
+            Assert.Equal(1, issuer.Dropped);                                       // one try: a deploy waits for it
+            Assert.False(Plugin.RestoreLicense(Home, appData, Decl(mod), true));
+            Assert.Equal(1, issuer.Dropped);                                       // asked again only after the wait
+            SetClock(() => t0 + Plugin.RestoreEveryS);
+            issuer.DropNext = 0;
+            Assert.True(Plugin.RestoreLicense(Home, appData, Decl(mod), true));
+            Assert.True(File.Exists(LicenseFile));
+
+            // a member no longer: refused, no license written, and the card offers the sign-in as before
+            File.Delete(LicenseFile);
+            issuer.RenewError = "not_member";
+            SetClock(() => t0 + 3 * Plugin.RestoreEveryS);
+            Assert.False(Plugin.RestoreLicense(Home, appData, Decl(mod), false));
+            Assert.False(File.Exists(LicenseFile));
+            Assert.Equal("none", Json.Str(StateOf(mod), "state"));
+            SetClock(() => DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        }
+
         [Fact]
         public void Signing_out_removes_the_license_and_the_token()
         {
@@ -1835,7 +1911,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal(1, log.Split('\n').Count(l => l.Contains(tag + "license: licensed until ")));
             Assert.Contains("license names " + A + ", accounts here " + A, log);
             Assert.DoesNotContain(issuer.RenewToken, log);
-            Assert.Equal("1.15.0", Plugin.PluginVersion);
+            Assert.Equal("1.15.1", Plugin.PluginVersion);
             Assert.Equal(Plugin.PluginVersion, issuer.LastClientHeader);
         }
 
@@ -1855,7 +1931,7 @@ namespace Hd2Qd.License.Tests
             Assert.Equal("K7Q2-M9XA", Json.Str(r, "code"));
             Assert.Equal(30L, Json.Long(r, "days"));
             var sent = issuer.LastDiagLog;
-            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.15.0\nmanager=0.22.0\n", sent);
+            Assert.StartsWith("HD2 MOD LICENSE LOG 1\nissuer=" + issuer.Name + "\nplugin=1.15.1\nmanager=0.22.0\n", sent);
             // (1.15.0) the network now, in the head: each fact once, before the lines
             var head = sent.Substring(0, sent.IndexOf("\n---\n"));
             foreach (var fact in new[] { "proxy", "adapters", "windows", "hosts", "software", "clock" }) Assert.Contains("\nnetwork." + fact + "=", head);

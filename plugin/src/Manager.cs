@@ -158,6 +158,18 @@ namespace Hd2Qd.License
 
         static int startedOnce;
 
+        /// <summary>(1.15.1) Before a deploy and at a game start: each issuer of the library whose
+        /// license file went while its renew token is kept here gets it back (RestoreLicense), one
+        /// request each, no retry. True when one was written.</summary>
+        static bool RestoreLicenses(Dictionary<string, object> host)
+        {
+            bool any = false;
+            foreach (var (decl, _, _) in Issuers(LibraryOf(host)))
+                try { any |= RestoreLicense(Home(host), AppData(host), decl, true); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is System.Security.Cryptography.CryptographicException) { }
+            return any;
+        }
+
         /// <summary>(1.9.0) What Start sets going, for a plugin added while the window was open:
         /// the manager calls Start only when its window opens, so a plugin added from the Plugins
         /// page watched no game until the manager was restarted, and a sealed mod stayed locked

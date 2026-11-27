@@ -151,6 +151,7 @@ namespace Hd2Qd.License
             string home = Home(host), appData = AppData(host);
             var opened = new HashSet<string>(StringComparer.OrdinalIgnoreCase);    // "seg|<folder>", "pay|<folder>"
             int sealedCount;
+            RestoreLicenses(host);          // (1.15.1) a license file that went comes back first
             lock (segmentsLock)
             {
                 any |= UnlockSegments(host, late, opened, Pass.Kept).Any;

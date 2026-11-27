@@ -413,6 +413,50 @@ namespace Hd2Qd.License
             return error != null ? Err(error) : new Dictionary<string, object> { ["renewed"] = false };
         }
 
+        /// <summary>(1.15.1) A license file that is gone, ran out or no longer reads, while this
+        /// computer still keeps the member's renew token: renewed from that token, with no
+        /// browser. The file lives in the game's own data folder (%APPDATA%\Arrowhead\Helldivers2),
+        /// which players clear to fix crashes; the token lives in the manager's folder and stays
+        /// (a player's log, 2026-11-27: the folder went with the manager open, the card said "not
+        /// signed in", and the player had to sign in again through the browser, because only the
+        /// manager's start renewed a missing license). The card, every deploy and every game start
+        /// call this. once: one request, no retry (a deploy waits for it). While it fails it is
+        /// tried at most every RestoreEveryS per issuer, so an issuer out of reach does not hold
+        /// up each deploy. True when a license was written.</summary>
+        public static bool RestoreLicense(string home, string appData, Dictionary<string, object> decl, bool once)
+        {
+            string issuer = Json.Str(decl, "issuer"), key = Json.Str(decl, "key");
+            if (issuer == null || key == null || TestIssuer(issuer)) return false;
+            var rec = IssuerRecord(home, issuer);
+            if (rec == null || Json.Str(rec, "key") != key) return false;
+            var tokens = RenewTokens(rec);
+            if (tokens.Count == 0) return false;
+            long now = Now();
+            var text = ReadLicense(appData, issuer);
+            var held = text == null ? new List<Dictionary<string, string>>() : Licenses(text, issuer, key);
+            bool missing = tokens.Any(t => !held.Any(f => (t.Holder == "" || Holder(f) == t.Holder) && Expires(f) > now));
+            if (!missing) return false;
+            if (restoreTried.TryGetValue(issuer, out var last) && now - last < RestoreEveryS) return false;
+            restoreTried[issuer] = now;
+            Log(home, issuer, (text == null ? "license file missing here" : "no license good here for a member signed in here")
+                + ": renewing it from the sign-in kept here");
+            bool was = oneTry;
+            oneTry = once;
+            try
+            {
+                if (!Json.Bool(Renew(home, appData, decl, false), "renewed")) return false;
+                restoreTried.TryRemove(issuer, out _);
+                return true;
+            }
+            finally { oneTry = was; }
+        }
+
+        /// <summary>(1.15.1) How long a failed RestoreLicense waits before it asks again.</summary>
+        public static long RestoreEveryS = 120;
+
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> restoreTried =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, long>();
+
         /// <summary>Signs out here: the license file, the renew token and the pinned key go.</summary>
         public static void Forget(string home, string appData, string issuer)
         {

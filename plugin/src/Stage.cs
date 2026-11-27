@@ -187,6 +187,7 @@ namespace Hd2Qd.License
         /// manager reads false as "a plugin could not make every protected mod ready".</summary>
         public static bool PrepareDeploy(Dictionary<string, object> host)
         {
+            RestoreLicenses(host);        // (1.15.1) a license file that went comes back first
             var root = StageRoot(host);
             if (root == null) return false;
             bool forSession = host.TryGetValue("for_session", out var fs) && fs is bool b && b;

@@ -148,6 +148,9 @@ namespace Hd2Qd.License
                 // member who paid for more time or another tier sees it when they look
                 if (!busy && !TestIssuer(issuer) && state == "licensed" && signingIn == null && Now() - Json.Long(now, "issued") >= FreshFor)
                     RenewInBackground(decl, host);
+                // (1.15.1) a license file that went while the sign-in is kept here comes back on its own
+                else if (!busy && signingIn == null && (state == "none" || state == "no_account" || state == "expired" || state == "invalid"))
+                    RestoreInBackground(decl, host);
                 var about = new List<string>();
                 // (1.11.3) the buttons: what this state needs done, nothing more (1.11.2 showed up to
                 // five in a row: sign in again, code, sign out, fetch again, send log; the user,
@@ -535,6 +538,18 @@ namespace Hd2Qd.License
             Task.Run(() =>
             {
                 try { if (Json.Bool(Renew(home, appData, decl, false), "renewed")) RefreshFromWorker(host); }
+                catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException) { }
+            });
+        }
+
+        /// <summary>(1.15.1) RestoreLicense in the background, with retries, and a redraw when the
+        /// license came back. Its own wait between failed tries keeps the card's redraws cheap.</summary>
+        static void RestoreInBackground(Dictionary<string, object> decl, Dictionary<string, object> host)
+        {
+            string home = Home(host), appData = AppData(host);
+            Task.Run(() =>
+            {
+                try { if (RestoreLicense(home, appData, decl, false)) RefreshFromWorker(host); }
                 catch (Exception x) when (x is System.IO.IOException || x is UnauthorizedAccessException || x is System.Security.Cryptography.CryptographicException) { }
             });
         }
